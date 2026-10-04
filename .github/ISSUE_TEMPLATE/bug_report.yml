@@ -1,0 +1,34 @@
+name: Bug report
+description: Something does not work as it should
+labels: [bug]
+body:
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you did, what you expected, what you got instead.
+    validations:
+      required: true
+  - type: textarea
+    id: repro
+    attributes:
+      label: How to reproduce
+      placeholder: |
+        1. Connect Codex over MCP
+        2. Ask it to deploy_artifact with only one file
+        3. ...
+  - type: input
+    id: agent
+    attributes:
+      label: Agent involved (if any)
+      placeholder: Claude Code 2.x / Codex 0.5x / Gemini CLI / Cursor / browser only
+  - type: input
+    id: version
+    attributes:
+      label: Falconia version
+      description: Shown in the Instance panel, or `falconia version`.
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      render: shell

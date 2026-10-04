@@ -1,0 +1,42 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root { color-scheme: dark; }
+html, body, #root { height: 100%; }
+
+/* Shared components ------------------------------------------------------- */
+@layer components {
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-3 py-2 text-sm font-medium
+           transition-colors disabled:opacity-40 disabled:cursor-not-allowed;
+  }
+  .btn-primary  { @apply btn bg-accent-500 font-semibold text-ink-950 hover:bg-accent-400; }
+  .btn-ghost    { @apply btn bg-ink-800 text-ink-100 hover:bg-ink-700; }
+  .btn-outline  { @apply btn border border-ink-700 hover:bg-ink-800; }
+  .input {
+    @apply w-full rounded-lg bg-ink-800 border border-ink-700 px-3 py-2 text-sm
+           placeholder:text-ink-500 focus:outline-none focus:border-accent-500;
+  }
+  .card { @apply rounded-2xl bg-ink-900 border border-ink-800; }
+  .card-hover { @apply card hover:border-accent-500/50 transition-colors; }
+  .chip { @apply inline-flex items-center gap-1 rounded-full bg-ink-800 px-2 py-0.5 text-xs text-ink-300; }
+  .side-btn { @apply flex items-center gap-2 rounded-lg px-3 py-2 text-ink-300 hover:bg-ink-800 hover:text-white transition-colors text-left w-full; }
+  .cat-chip { @apply inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full border border-ink-700 text-sm hover:border-accent-400 hover:text-white transition-colors bg-ink-900; }
+  .cat-chip-active { @apply !bg-accent-500 !text-ink-950 !border-accent-500; }
+}
+
+/* Thin scrollbars everywhere ---------------------------------------------- */
+* { scrollbar-width: thin; scrollbar-color: #232733 transparent; }
+*::-webkit-scrollbar { width: 8px; height: 8px; }
+*::-webkit-scrollbar-thumb { background: #232733; border-radius: 8px; }
+
+/* The artifact frame: no border, white background (the artifact expects a clean
+   canvas, its origin is opaque and the app's UI must not leak into it). */
+.artifact-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: white;
+  color-scheme: light;
+}

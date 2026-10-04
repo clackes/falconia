@@ -1,0 +1,101 @@
+# Development topology.
+#
+# Three services and two backend ports, because artifacts live on a different
+# origin from the application: in development the different port is enough to
+# make two distinct origins; in production there are two hostnames.
+#
+#   http://localhost:5173  web interface
+#   http://localhost:8080  API, MCP, CLI installer
+#   http://localhost:8081  artifact content
+#
+# Host ports can be changed from .env (APP_PORT, API_PORT, CONTENT_PORT,
+# POSTGRES_PORT): on a machine running other stacks the defaults are often
+# taken.
+#
+# The project name differs from production's: with the same name the two
+# stacks would share volumes, that is, the database.
+name: falconia-dev
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-falconia}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-falconia_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-falconia}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-falconia} -d ${POSTGRES_DB:-falconia}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      # The context is the repository root: the image builds both the backend
+      # and the CLI, which are two separate Go modules.
+      context: .
+      dockerfile: backend/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-falconia}:${POSTGRES_PASSWORD:-falconia_dev_password}@postgres:5432/${POSTGRES_DB:-falconia}?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      CONTENT_LISTEN_ADDR: ":8081"
+      APP_BASE_URL: ${APP_BASE_URL:-http://localhost:5173}
+      CONTENT_BASE_URL: ${CONTENT_BASE_URL:-http://localhost:8081}
+      API_BASE_URL: ${API_BASE_URL:-http://localhost:8080}
+      JWT_SECRET: ${JWT_SECRET:-dev-jwt-secret-change-me-16}
+      CONTENT_SECRET: ${CONTENT_SECRET:-dev-content-secret-change-me}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-true}
+      BLOB_BACKEND: ${BLOB_BACKEND:-fs}
+      BLOB_ROOT: /data/blobs
+    ports:
+      - "${API_PORT:-8080}:8080"
+      - "${CONTENT_PORT:-8081}:8081"
+    volumes:
+      - blob_data:/data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - backend
+    environment:
+      VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8080}
+    ports:
+      - "${APP_PORT:-5173}:5173"
+    # The source is mounted so edits hot-reload; dependencies and the copied
+    # Monaco files stay inside the image.
+    volumes:
+      - ./frontend/src:/app/src:ro
+      - ./frontend/index.html:/app/index.html:ro
+
+  # Optional object storage, for a backend without local state.
+  # Started only on request:  docker compose --profile s3 up -d
+  minio:
+    image: minio/minio:latest
+    profiles: ["s3"]
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_ACCESS_KEY:-falconia}
+      MINIO_ROOT_PASSWORD: ${S3_SECRET_KEY:-falconia_dev_password}
+    ports:
+      - "127.0.0.1:9000:9000"
+      - "127.0.0.1:9001:9001"
+    volumes:
+      - minio_data:/data
+
+volumes:
+  postgres_data:
+  blob_data:
+  minio_data:

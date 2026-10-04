@@ -1,0 +1,8 @@
+Falconia
+Copyright 2026 clackes and the Falconia contributors
+
+This product is licensed under the Apache License, Version 2.0 (see LICENSE).
+
+The review loop ("the agent publishes, people comment, the agent fixes") owes
+a debt to Glance by Plivo Labs (https://github.com/plivo-labs/glance) and to
+display.dev.

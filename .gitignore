@@ -1,0 +1,26 @@
+# Secrets and local configuration
+.env
+.env.prod
+.env.prod.bak-*
+
+# Dependencies and builds
+node_modules/
+dist/
+build/
+backend/bin/
+# `go build` inside cli/ leaves a binary named after the folder.
+cli/cli
+cli/falconia
+cli/sfa
+frontend/tsconfig.tsbuildinfo
+
+# Monaco is copied here by `npm run monaco`, not versioned
+frontend/public/monaco/
+frontend/public/monaco-vs/
+
+# Test leftovers
+__pycache__/
+*.pyc
+
+*.log
+.DS_Store

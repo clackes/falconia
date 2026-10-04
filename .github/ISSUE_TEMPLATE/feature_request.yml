@@ -1,0 +1,21 @@
+name: Idea or feature request
+description: Suggest something Falconia should do
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: The problem
+      description: What are you trying to do, and what gets in the way?
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: What you would like
+  - type: checkboxes
+    id: neutral
+    attributes:
+      label: Agent neutrality
+      options:
+        - label: This would work for any AI agent, not just one vendor's

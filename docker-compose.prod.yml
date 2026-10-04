@@ -1,0 +1,106 @@
+# Production topology.
+#
+# No service publishes a public port: a reverse proxy or a tunnel in front
+# talks to the nginx container over a shared network. Backend and database sit
+# on an internal network the proxy cannot reach.
+#
+# You need TWO hostnames, both pointing at falconia-frontend:80. The first
+# serves the application, the second serves artifacts, and they must differ:
+# that difference is what keeps the code inside an artifact away from the
+# session of whoever is looking at it. The backend refuses to start if
+# APP_BASE_URL and CONTENT_BASE_URL are the same origin.
+#
+#   cp .env.prod.example .env.prod && chmod 600 .env.prod   # then edit it
+#   docker compose -f docker-compose.prod.yml --env-file .env.prod up -d --build
+name: falconia
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: falconia-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:?POSTGRES_USER is required}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD is required}
+      POSTGRES_DB: ${POSTGRES_DB:-falconia}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks: [internal]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB:-falconia}"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+      args:
+        VERSION: ${FALCONIA_VERSION:-dev}
+    # The prefix matters: on a network shared with other stacks, a generic
+    # alias like "backend" can make Docker's DNS resolve the wrong container.
+    container_name: falconia-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENV: production
+      DATABASE_URL: postgres://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-falconia}?sslmode=disable
+      LISTEN_ADDR: ":8080"
+      CONTENT_LISTEN_ADDR: ":8081"
+      APP_BASE_URL: ${APP_BASE_URL:?APP_BASE_URL is required}
+      CONTENT_BASE_URL: ${CONTENT_BASE_URL:?CONTENT_BASE_URL is required}
+      API_BASE_URL: ${API_BASE_URL:?API_BASE_URL is required}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET is required}
+      CONTENT_SECRET: ${CONTENT_SECRET:?CONTENT_SECRET is required}
+      ALLOW_REGISTRATION: ${ALLOW_REGISTRATION:-false}
+      BLOB_BACKEND: ${BLOB_BACKEND:-fs}
+      BLOB_ROOT: /data/blobs
+      S3_ENDPOINT: ${S3_ENDPOINT:-}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-}
+      S3_SECRET_KEY: ${S3_SECRET_KEY:-}
+      S3_BUCKET: ${S3_BUCKET:-falconia}
+      MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-64}
+    volumes:
+      - blob_data:/data
+    ports:
+      # The content origin, reachable without the proxy to check it in
+      # isolation. In a real deployment the reverse proxy reaches it through
+      # its own hostname.
+      - "${BIND_ADDR:-127.0.0.1}:${CONTENT_PORT:-5274}:8081"
+    networks: [internal]
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+      args:
+        # Vite inlines this value into the bundle: changing it needs --build.
+        VITE_API_BASE: ${APP_BASE_URL}
+    container_name: falconia-frontend
+    restart: unless-stopped
+    depends_on: [backend]
+    ports:
+      # Bound to a private address by default: it lets you reach the instance
+      # without the proxy, not expose it to the internet.
+      - "${BIND_ADDR:-127.0.0.1}:${APP_PORT:-5273}:80"
+    networks: [internal, web]
+
+networks:
+  internal:
+    driver: bridge
+  web:
+    # The network your reverse proxy or tunnel lives on. Create it first, or
+    # remove "external" and attach the proxy to this stack.
+    external: true
+    name: ${PROXY_NETWORK:-proxy}
+
+volumes:
+  # The names are configurable so an existing installation can keep its data
+  # after an upgrade: point them at the volumes you already have.
+  postgres_data:
+    name: ${POSTGRES_VOLUME:-falconia_postgres_data}
+  blob_data:
+    name: ${BLOB_VOLUME:-falconia_blob_data}
