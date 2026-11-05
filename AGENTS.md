@@ -14,7 +14,7 @@ that only works with one vendor's agent.
 
 ## Layout
 
-- `backend/` — Go 1.25. Entry `cmd/api`. Packages in `internal/`: `storage`
+- `backend/` — Go 1.26. Entry `cmd/api`. Packages in `internal/`: `storage`
   (Postgres + embedded migrations), `handlers` (HTTP), `tools` (agent toolset
   for MCP and chat), `publish` (patch-style versions), `mcp`, `content`
   (separate-origin server + `assets/sdk.js`), `agents` (agent identification),

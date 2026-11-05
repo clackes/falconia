@@ -26,7 +26,7 @@ The frontend container hot-reloads. After backend changes:
 Run what CI runs before opening a pull request:
 
 ```bash
-# Backend (Go 1.25)
+# Backend (Go 1.26)
 cd backend && go vet ./... && go test ./...
 # CLI
 cd cli && go vet ./... && go build ./...
@@ -37,7 +37,7 @@ python3 tests/e2e/smoke.py
 ```
 
 No Go toolchain? Use Docker:
-`docker run --rm -v "$PWD":/src -w /src/backend golang:1.25-alpine go test ./...`
+`docker run --rm -v "$PWD":/src -w /src/backend golang:1.26-alpine go test ./...`
 
 ## Where things are
 

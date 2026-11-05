@@ -6,7 +6,7 @@
 # the binary from the server it will talk to, with that server's address
 # already configured. It is the only way it works on a network without
 # internet access, and it means "run this curl line" is all an agent needs.
-FROM golang:1.25-alpine AS build
+FROM golang:1.26-alpine AS build
 WORKDIR /src
 RUN apk add --no-cache ca-certificates git
 
