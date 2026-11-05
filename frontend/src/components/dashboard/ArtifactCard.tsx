@@ -1,5 +1,9 @@
+import { useState } from 'react'
 import { Link } from 'react-router-dom'
 import type { Artifact } from '../../lib/api'
+import { Menu, MenuItem } from '../ui/Menu'
+import { MoveDialog } from '../viewer/MoveDialog'
+import { DeleteDialog } from '../viewer/DeleteDialog'
 import { ago, visibilityIcon, visibilityLabel } from '../../lib/format'
 import { AgentStack } from '../ui/AgentBadge'
 
@@ -11,9 +15,17 @@ import { AgentStack } from '../ui/AgentBadge'
  * people asking me to fix". The agents that worked on it come right after:
  * they are the visible proof that the artifact does not belong to any of them.
  */
-export function ArtifactCard({ a }: { a: Artifact }) {
+export function ArtifactCard({ a, onChange }: {
+  a: Artifact
+  /** Called after a move (with the moved artifact) or a delete (with null). */
+  onChange?(next: Artifact | null): void
+}) {
+  const [dialog, setDialog] = useState<'move' | 'delete' | null>(null)
+  const manage = a.my_role === 'owner' && !!onChange
+
   return (
-    <Link to={a.path} className="card-hover flex flex-col p-4">
+    <div className="relative flex">
+    <Link to={a.path} className={`card-hover flex flex-1 flex-col p-4 ${manage ? 'pr-12' : ''}`}>
       <div className="flex items-start gap-3">
         <Thumb a={a} />
         <div className="min-w-0 flex-1">
@@ -44,6 +56,25 @@ export function ArtifactCard({ a }: { a: Artifact }) {
         <div className="mt-2"><AgentStack agents={a.agents} /></div>
       )}
     </Link>
+    {/* Outside the link: a button inside an <a> is invalid and would navigate. */}
+    {manage && (
+      <div className="absolute right-2 top-2">
+        <Menu label={<span aria-hidden>⋯</span>} title="Manage this artifact"
+          className="btn-ghost !bg-transparent !px-2 !py-1 text-ink-500 hover:!bg-ink-800 hover:text-white">
+          <MenuItem onClick={() => setDialog('move')} hint={`Now in ${a.space_name}`}>Move to…</MenuItem>
+          <MenuItem onClick={() => setDialog('delete')} danger>Delete</MenuItem>
+        </Menu>
+      </div>
+    )}
+    {dialog === 'move' && (
+      <MoveDialog artifact={a} onClose={() => setDialog(null)}
+        onMoved={(next) => { setDialog(null); onChange?.({ ...a, ...next, my_role: a.my_role }) }} />
+    )}
+    {dialog === 'delete' && (
+      <DeleteDialog artifact={a} onClose={() => setDialog(null)}
+        onDeleted={() => { setDialog(null); onChange?.(null) }} />
+    )}
+    </div>
   )
 }
 

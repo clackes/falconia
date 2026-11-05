@@ -42,7 +42,11 @@ export function SpacePage() {
         </div>
       ) : (
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {items.map((a) => <ArtifactCard key={a.id} a={a} />)}
+          {items.map((a) => (
+            // Moved elsewhere or deleted: either way it leaves this space.
+            <ArtifactCard key={a.id} a={a}
+              onChange={() => setItems((xs) => (xs ?? []).filter((x) => x.id !== a.id))} />
+          ))}
         </div>
       )}
     </div>

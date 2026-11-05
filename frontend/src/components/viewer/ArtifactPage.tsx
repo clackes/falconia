@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Link, useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import {
   api, ref as makeRef,
-  type Anchor, type Artifact, type ArtifactVersion, type Thread,
+  type AccessRequest, type Anchor, type Artifact, type ArtifactVersion, type Thread,
 } from '../../lib/api'
 import { mountArtifact, type SandboxHandle } from '../../lib/sandbox'
 import { useSession } from '../../lib/session'
@@ -12,6 +12,11 @@ import { ReviewPanel } from './ReviewPanel'
 import { ShareDialog } from './ShareDialog'
 import { VersionsDialog } from './VersionsDialog'
 import { ContinueDialog } from './ContinueDialog'
+import { DeleteDialog } from './DeleteDialog'
+import { MoveDialog } from './MoveDialog'
+import { RequestAccessDialog } from './RequestAccessDialog'
+import { AccessRequestList } from './AccessRequestList'
+import { Menu, MenuDivider, MenuItem } from '../ui/Menu'
 
 /**
  * The viewer: the artifact full screen, comments on the side.
@@ -25,6 +30,7 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
   const { space, slug, id } = useParams()
   const { user } = useSession()
   const nav = useNavigate()
+  const [search] = useSearchParams()
 
   const artifactRef = artifactId ?? id ?? makeRef(space!, slug!)
 
@@ -37,8 +43,11 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
   const [pendingAnchor, setPendingAnchor] = useState<Anchor | null>(null)
   const [picking, setPicking] = useState(false)
   const [showPanel, setShowPanel] = useState(() => window.innerWidth >= 768)
-  const [dialog, setDialog] = useState<'share' | 'versions' | 'continue' | null>(null)
-  const [menu, setMenu] = useState(false)
+  // ?connect=1 comes from "Connect your agent" on a shared link, after sign-in.
+  const [dialog, setDialog] = useState<'share' | 'versions' | 'continue' | 'move' | 'delete' | 'request' | null>(
+    () => search.get('connect') ? 'continue' : null)
+  const [requests, setRequests] = useState<AccessRequest[]>([])
+  const [myRequest, setMyRequest] = useState<AccessRequest | null>(null)
   const [err, setErr] = useState('')
 
   const iframeRef = useRef<HTMLIFrameElement | null>(null)
@@ -104,6 +113,18 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
     return () => { alive = false; handleRef.current?.destroy(); handleRef.current = null }
   }, [artifact?.id, artifactRef, pickedVersion])
 
+  // Owners see who is waiting for edit access; everyone else, their own request.
+  useEffect(() => {
+    if (!artifact || artifact.my_role === 'editor') return
+    let alive = true
+    api.accessRequests(artifact.id).then((r) => {
+      if (!alive) return
+      setRequests(r.requests ?? [])
+      setMyRequest(r.mine ?? null)
+    }).catch(() => { /* never block the artifact over this */ })
+    return () => { alive = false }
+  }, [artifact?.id, artifact?.my_role])
+
   // The pins inside the iframe follow the threads.
   useEffect(() => { handleRef.current?.showThreads(threads) }, [threads])
   useEffect(() => { handleRef.current?.setCommentMode(picking) }, [picking])
@@ -158,36 +179,48 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
               <AgentStack agents={artifact.agents} />
             </span>
           )}
-          {/* Secondary actions: inline on wide screens, behind ⋯ on phones. */}
-          <div className={`${menu ? 'flex' : 'hidden'} absolute right-3 top-14 z-40 w-52 flex-col gap-1 rounded-xl border border-ink-700 bg-ink-900 p-2 shadow-2xl sm:static sm:flex sm:w-auto sm:flex-row sm:gap-2 sm:border-0 sm:bg-transparent sm:p-0 sm:shadow-none`}
-            onClick={() => setMenu(false)}>
-            <button className="btn-ghost justify-start text-sm" onClick={() => setDialog('versions')}>
-              History
+
+          {/* The one thing each role comes here to do stays in sight: owners
+              and editors edit, viewers ask to. Everything else is in More. */}
+          {canDeploy ? (
+            <Link to={`/edit/${artifact.id}`} className="btn-ghost text-sm">Edit</Link>
+          ) : myRequest?.status === 'pending' ? (
+            <span className="chip text-xs" title="The owner has not answered yet">⏳ Edit access requested</span>
+          ) : (
+            <button className="btn-ghost text-sm" onClick={() => setDialog('request')}
+              title={myRequest?.status === 'declined' ? 'Your last request was declined' : 'Ask the owner to let you edit'}>
+              {myRequest?.status === 'declined' ? 'Request access again' : 'Request edit access'}
             </button>
-            {canDeploy && (
-              <button className="btn-ghost justify-start text-sm" onClick={() => setDialog('continue')}
-                title="Edit this artifact with any AI agent">
-                Continue with…
-              </button>
-            )}
-            {canDeploy && (
-              <Link to={`/edit/${artifact.id}`} className="btn-ghost justify-start text-sm">Edit</Link>
-            )}
-            {artifact.forkable && !canDeploy && (
-              <button className="btn-ghost justify-start text-sm" onClick={async () => {
-                const r = await api.fork(artifactRef)
-                nav(r.artifact.path)
-              }}>Make a copy</button>
-            )}
-          </div>
-          <button className="btn-ghost !px-2.5 text-sm sm:hidden" onClick={() => setMenu((v) => !v)}
-            aria-label="More actions" aria-expanded={menu}>⋯</button>
+          )}
+
           <button
             className={`btn text-sm ${showPanel ? 'bg-ink-700 text-white' : 'btn-ghost'}`}
             onClick={() => setShowPanel((v) => !v)}
           >
             Comments{openThreads > 0 ? ` · ${openThreads}` : ''}
           </button>
+
+          <Menu label="More" title="More actions">
+            <MenuItem onClick={() => setDialog('continue')}
+              hint={canDeploy ? 'Edit it from Claude, Codex, Gemini…' : 'Let your AI read and comment'}>
+              {canDeploy ? 'Continue with an agent' : 'Connect your agent'}
+            </MenuItem>
+            <MenuItem onClick={() => setDialog('versions')} hint="Every published version">History</MenuItem>
+            {artifact.forkable && !canDeploy && (
+              <MenuItem onClick={async () => {
+                const r = await api.fork(artifactRef)
+                nav(r.artifact.path)
+              }} hint="Your own editable copy">Make a copy</MenuItem>
+            )}
+            {isOwner && (
+              <>
+                <MenuDivider />
+                <MenuItem onClick={() => setDialog('move')} hint={`Now in ${artifact.space_name}`}>Move to…</MenuItem>
+                <MenuItem onClick={() => setDialog('delete')} danger>Delete</MenuItem>
+              </>
+            )}
+          </Menu>
+
           {isOwner && (
             <button className="btn-primary text-sm" onClick={() => setDialog('share')}>
               Share
@@ -195,6 +228,13 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
           )}
         </div>
       </header>
+
+      {isOwner && requests.length > 0 && (
+        <div className="border-b border-ink-800 bg-accent-500/5 px-3 py-2.5 sm:px-4">
+          <AccessRequestList requests={requests}
+            onDecided={(id) => setRequests((rs) => rs.filter((x) => x.id !== id))} />
+        </div>
+      )}
 
       {viewingOld && (
         <div className="flex items-center gap-3 bg-amber-500/10 px-4 py-2 text-sm text-amber-200">
@@ -252,7 +292,24 @@ export function ArtifactPage({ artifactId }: { artifactId?: string } = {}) {
         />
       )}
       {dialog === 'continue' && (
-        <ContinueDialog artifact={artifact} onClose={() => setDialog(null)} />
+        <ContinueDialog artifact={artifact} onClose={() => setDialog(null)}
+          onRequestAccess={myRequest?.status === 'pending' ? undefined : () => setDialog('request')} />
+      )}
+      {dialog === 'move' && (
+        <MoveDialog artifact={artifact} onClose={() => setDialog(null)}
+          onMoved={(a) => {
+            setDialog(null)
+            setArtifact({ ...artifact, ...a, my_role: artifact.my_role })
+            // The /s/<space>/<slug> address changed with the space.
+            if (!artifactId) nav(a.path, { replace: true })
+          }} />
+      )}
+      {dialog === 'request' && (
+        <RequestAccessDialog artifact={artifact} onClose={() => setDialog(null)}
+          onSent={(r) => { setMyRequest(r); setDialog(null) }} />
+      )}
+      {dialog === 'delete' && (
+        <DeleteDialog artifact={artifact} onClose={() => setDialog(null)} onDeleted={() => nav('/')} />
       )}
     </div>
   )

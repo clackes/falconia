@@ -81,6 +81,16 @@ export type Space = {
   kind: 'personal' | 'org'; my_role?: string
 }
 
+/** A viewer asking the owner for editor access. */
+export type AccessRequest = {
+  id: string; artifact_id: string
+  user_id: string; email: string; name: string
+  message: string; status: 'pending' | 'approved' | 'declined'
+  created_at: string; decided_at?: string | null
+  // Only in the inbox, which spans several artifacts.
+  artifact_title?: string; artifact_path?: string
+}
+
 /** General access, like a Google Doc's. */
 export type Visibility = 'private' | 'org' | 'link'
 
@@ -222,6 +232,15 @@ export const api = {
   artifact: (r: string, version?: number) =>
     GET<{ artifact: Artifact; version?: ArtifactVersion; files?: BundleFile[] }>(
       `/api/artifacts/${r}${version ? `?v=${version}` : ''}`),
+  deleteArtifact: (r: string) => DELETE<void>(`/api/artifacts/${r}`),
+
+  accessRequests: (r: string) =>
+    GET<{ requests?: AccessRequest[]; mine?: AccessRequest | null }>(`/api/artifacts/${r}/access-requests`),
+  requestAccess: (r: string, message: string) =>
+    POST<{ request: AccessRequest }>(`/api/artifacts/${r}/access-requests`, { message }),
+  accessInbox: () => GET<{ requests: AccessRequest[] }>('/api/access-requests'),
+  decideAccess: (id: string, approve: boolean) =>
+    POST<{ request: AccessRequest }>(`/api/access-requests/${id}/decide`, { approve }),
   byPath: (space: string, slug: string, version?: number) =>
     GET<{ artifact: Artifact; version?: ArtifactVersion; files?: BundleFile[] }>(
       `/api/s/${space}/${slug}${version ? `?v=${version}` : ''}`),

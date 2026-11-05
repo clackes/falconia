@@ -151,6 +151,13 @@ export function CreatorStudio() {
         busy={busy}
         onPublish={save}
         onUpload={() => setUploading(true)}
+        onReloadPreview={paint}
+        onOpenPreview={() => openStandalone(preview)}
+        onDownload={() => downloadHTML(code, `${slugify(title) || 'artifact'}.html`)}
+        onDiscard={() => {
+          if (window.confirm('Discard the changes you have not published?')) setCode(baseline)
+        }}
+        publishedPath={artifact?.path}
       />
 
       {bundleFiles > 1 && (
@@ -253,6 +260,15 @@ function openStandalone(html: string) {
   // Revoking right away would break the tab just opened; a minute is enough
   // for it to load without keeping the blob for the whole session.
   setTimeout(() => URL.revokeObjectURL(url), 60_000)
+}
+
+function downloadHTML(html: string, filename: string) {
+  const url = URL.createObjectURL(new Blob([html], { type: 'text/html' }))
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(url), 10_000)
 }
 
 function slugify(s: string): string {

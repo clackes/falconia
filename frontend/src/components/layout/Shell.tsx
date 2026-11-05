@@ -1,5 +1,6 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
+import { api } from '../../lib/api'
 import { useSession } from '../../lib/session'
 import { Logo } from '../ui/Logo'
 
@@ -15,6 +16,16 @@ export function Shell() {
   const nav = useNavigate()
   const loc = useLocation()
   const [open, setOpen] = useState(false)
+  const [waiting, setWaiting] = useState(0)
+
+  // Pending edit-access requests, refreshed on navigation and whenever the
+  // dashboard answers one.
+  useEffect(() => {
+    const load = () => api.accessInbox().then((r) => setWaiting(r.requests.length)).catch(() => {})
+    void load()
+    window.addEventListener('falconia:requests', load)
+    return () => window.removeEventListener('falconia:requests', load)
+  }, [loc.pathname])
   const teamSpaces = spaces.filter((s) => s.kind === 'org')
   const personal = spaces.find((s) => s.kind === 'personal')
 
@@ -37,6 +48,13 @@ export function Shell() {
             <Item to="/" label="All artifacts" icon="🗂" end />
             <Item to="/new" label="New artifact" icon="✨" />
             <Item to="/connect" label="Connect agents" icon="🔌" />
+            {waiting > 0 && (
+              <NavLink to="/#requests" className="side-btn text-sm">
+                <span aria-hidden>🙋</span>
+                <span className="flex-1 truncate">Access requests</span>
+                <span className="rounded-full bg-accent-500 px-1.5 text-xs font-semibold text-ink-950">{waiting}</span>
+              </NavLink>
+            )}
           </div>
 
           {personal && (

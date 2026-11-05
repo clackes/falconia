@@ -10,30 +10,52 @@ type Tab = 'mcp' | 'cli' | 'download'
  * "Continue with any agent": how to pick this artifact up from whatever AI
  * you use today.
  *
+ * Editors get the full loop (read, change, publish). Viewers can still bring
+ * their agent: it reads the source and the comments, and leaves feedback.
+ *
  * This is the promise of the whole product made concrete. The artifact may
  * have been made with Claude; if you now pay for Codex, or a teammate prefers
  * Gemini, the source, the history and the open comments are all one prompt or
  * one command away.
  */
-export function ContinueDialog({ artifact, onClose }: { artifact: Artifact; onClose(): void }) {
+export function ContinueDialog({ artifact, onClose, onRequestAccess }: {
+  artifact: Artifact; onClose(): void; onRequestAccess?(): void
+}) {
+  const canEdit = artifact.my_role === 'owner' || artifact.my_role === 'editor'
   const [tab, setTab] = useState<Tab>('mcp')
   const [err, setErr] = useState('')
   const url = window.location.origin + artifact.path
   const ref = `${artifact.space_slug}/${artifact.slug ?? artifact.id}`
 
-  const prompt = artifact.open_threads > 0
+  const prompt = !canEdit
+    ? `Open the Falconia artifact ${url} with get_artifact and read its source and its comments with list_threads. Then <what you want to know or suggest>, and leave your feedback on it with comment_artifact.`
+    : artifact.open_threads > 0
     ? `Open the Falconia artifact ${url}: read its source with get_artifact and its open comments with list_threads. Fix what the comments ask, publish a new version with deploy_artifact (send only the files you change), then resolve each thread you addressed.`
     : `Open the Falconia artifact ${url} with get_artifact and read its source. Then <describe the change you want>, and publish a new version with deploy_artifact (send only the files you change).`
 
   return (
-    <Dialog title="Continue with any agent" onClose={onClose} wide>
+    <Dialog title={canEdit ? 'Continue with any agent' : 'Connect your agent'} onClose={onClose} wide>
       <p className="mb-4 text-sm text-ink-500">
         This artifact is not tied to the agent that made it. Pick it up from Claude Code,
         Codex, Gemini CLI, Cursor or anything else — every version and comment stays here.
       </p>
+      {!canEdit && (
+        <p className="mb-4 rounded-lg bg-ink-900 px-3 py-2 text-sm text-ink-300">
+          You can view this artifact: your agent can read it and comment on it. To publish
+          new versions, ask {artifact.author_name} for editor access
+          {artifact.forkable ? ', or make your own copy' : ''}.
+          {onRequestAccess && (
+            <button className="ml-1 text-accent-400 hover:underline" onClick={onRequestAccess}>
+              Request edit access
+            </button>
+          )}
+        </p>
+      )}
 
       <div className="mb-4 flex gap-1 rounded-lg bg-ink-900 p-1">
-        {([['mcp', 'Agent prompt (MCP)'], ['cli', 'Terminal (CLI)'], ['download', 'Download']] as [Tab, string][]).map(([id, label]) => (
+        {([['mcp', 'Agent prompt (MCP)'], ['cli', 'Terminal (CLI)'], ['download', 'Download']] as [Tab, string][])
+          // Pulling and downloading the files needs editor access.
+          .filter(([id]) => canEdit || id === 'mcp').map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             className={`flex-1 rounded-md px-3 py-1.5 text-sm transition-colors ${
               tab === id ? 'bg-ink-700 text-white' : 'text-ink-300 hover:text-white'}`}>

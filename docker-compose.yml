@@ -57,8 +57,8 @@ services:
       BLOB_BACKEND: ${BLOB_BACKEND:-fs}
       BLOB_ROOT: /data/blobs
     ports:
-      - "${API_PORT:-8080}:8080"
-      - "${CONTENT_PORT:-8081}:8081"
+      - "127.0.0.1:${API_PORT:-8080}:8080"
+      - "127.0.0.1:${CONTENT_PORT:-8081}:8081"
     volumes:
       - blob_data:/data
 
@@ -72,7 +72,7 @@ services:
     environment:
       VITE_API_BASE: ${VITE_API_BASE:-http://localhost:8080}
     ports:
-      - "${APP_PORT:-5173}:5173"
+      - "127.0.0.1:${APP_PORT:-5173}:5173"
     # The source is mounted so edits hot-reload; dependencies and the copied
     # Monaco files stay inside the image.
     volumes:

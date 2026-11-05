@@ -299,14 +299,27 @@ func (a *api) writeArtifactList(w http.ResponseWriter, r *http.Request, items []
 	for i := range items {
 		ids = append(ids, items[i].ID)
 	}
+	me := identityFrom(r).User.ID
 	likes, _ := a.deps.Store.LikeCountsBatch(r.Context(), ids)
-	mine, _ := a.deps.Store.MyLikedSet(r.Context(), identityFrom(r).User.ID, ids)
+	mine, _ := a.deps.Store.MyLikedSet(r.Context(), me, ids)
+	// Ownership is marked so cards can offer move and delete. It follows the
+	// same rules as ResolveAccess, from one query instead of one per row;
+	// other roles are left out, the viewer page resolves them exactly.
+	managed := map[uuid.UUID]bool{}
+	if spaces, err := a.deps.Store.ListMySpaces(r.Context(), me); err == nil {
+		for _, sp := range spaces {
+			managed[sp.ID] = sp.MyRole == "owner" || sp.MyRole == "admin"
+		}
+	}
 
 	out := make([]artifactJSON, 0, len(items))
 	for i := range items {
 		j := publicArtifact(&items[i])
 		j.Likes = likes[items[i].ID]
 		j.Liked = mine[items[i].ID]
+		if items[i].AuthorID == me || managed[items[i].SpaceID] {
+			j.MyRole = string(storage.RoleOwner)
+		}
 		out = append(out, j)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"artifacts": out})

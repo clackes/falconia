@@ -117,6 +117,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/api/artifacts/{id}/shares", a.requireScope(read, a.withArtifact(storage.RoleOwner, a.listShares)))
 	r.Post("/api/artifacts/{id}/shares", a.requireScope(write, a.withArtifact(storage.RoleOwner, a.addShare)))
 	r.Delete("/api/artifacts/{id}/shares/{email}", a.requireScope(write, a.withArtifact(storage.RoleOwner, a.removeShare)))
+	r.Get("/api/artifacts/{id}/access-requests", a.humanOnly(a.withArtifact(storage.RoleViewer, a.listAccessRequests)))
+	r.Post("/api/artifacts/{id}/access-requests", a.humanOnly(a.withArtifact(storage.RoleViewer, a.requestAccess)))
+	r.Get("/api/access-requests", a.humanOnly(a.accessInbox))
+	r.Post("/api/access-requests/{rid}/decide", a.humanOnly(a.decideAccessRequest))
 	r.Post("/api/artifacts/{id}/link/rotate", a.requireScope(write, a.withArtifact(storage.RoleOwner, a.rotateLink)))
 
 	// --- Review loop ---

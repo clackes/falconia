@@ -85,9 +85,17 @@ export function LinkPage() {
           </div>
         </div>
         {!user && (
-          <Link to="/auth" state={{ from: loc.pathname }} className="btn-outline shrink-0 text-sm">
-            Sign in to comment
-          </Link>
+          <div className="flex shrink-0 gap-2">
+            {/* The agent acts with the viewer's own access, so it needs an
+                account first; the viewer reopens on its connect dialog. */}
+            <Link to="/auth" state={{ from: `${loc.pathname}?connect=1` }} className="btn-outline text-sm"
+              title="Let your AI agent read this artifact, and edit it if you have editor access">
+              Connect your agent
+            </Link>
+            <Link to="/auth" state={{ from: loc.pathname }} className="btn-outline text-sm">
+              Sign in to comment
+            </Link>
+          </div>
         )}
       </header>
       <div className="relative min-h-0 flex-1 bg-white">

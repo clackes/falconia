@@ -54,6 +54,11 @@ func (s *Server) Handler() http.Handler {
 	return s.baseHeaders(mux)
 }
 
+// sandboxPolicy forces an opaque origin on everything served from here, also
+// when a file is opened directly in a tab rather than in the viewer's iframe.
+// It mirrors the iframe's sandbox attribute in frontend/src/lib/sandbox.ts.
+const sandboxPolicy = "sandbox allow-scripts allow-forms allow-modals allow-popups allow-downloads allow-popups-to-escape-sandbox"
+
 // baseHeaders puts on every response the headers that make serving untrusted
 // content safe.
 func (s *Server) baseHeaders(next http.Handler) http.Handler {
@@ -61,6 +66,7 @@ func (s *Server) baseHeaders(next http.Handler) http.Handler {
 		h := w.Header()
 		h.Set("X-Content-Type-Options", "nosniff")
 		h.Set("Referrer-Policy", "no-referrer")
+		h.Set("Content-Security-Policy", sandboxPolicy)
 		// The application sends COEP: without this the browser would refuse
 		// to frame or load anything coming from here.
 		h.Set("Cross-Origin-Resource-Policy", "cross-origin")
@@ -112,7 +118,7 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request) {
 	// frame-ancestors is only narrowed on the document: assets are not framed
 	// and the header would be noise.
 	if isEntry {
-		w.Header().Set("Content-Security-Policy", "frame-ancestors "+s.AppOrigin)
+		w.Header().Set("Content-Security-Policy", sandboxPolicy+"; frame-ancestors "+s.AppOrigin)
 		s.recordView(ctx, g, r)
 	}
 

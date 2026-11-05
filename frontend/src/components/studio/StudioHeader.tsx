@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import type { Space, Visibility } from '../../lib/api'
 import { visibilityHint, visibilityLabel } from '../../lib/format'
+import { Menu, MenuDivider, MenuItem, MenuLabel } from '../ui/Menu'
 
 export type Pane = 'split' | 'code' | 'preview'
 
@@ -18,6 +20,12 @@ type Props = {
   busy: boolean
   onPublish(): void
   onUpload(): void
+  onReloadPreview(): void
+  onOpenPreview(): void
+  onDownload(): void
+  onDiscard(): void
+  /** Where the published artifact lives, when editing one. */
+  publishedPath?: string
 }
 
 /**
@@ -26,7 +34,9 @@ type Props = {
  * It only holds what gets touched all the time: the title, which pane to look
  * at, and the publish button. Space, access and description are chosen once
  * and live behind the button, because keeping them always open filled the top
- * of the page with empty fields and made the Studio look like a form.
+ * of the page with empty fields and made the Studio look like a form. The
+ * rest is grouped like in any editor: View for what you see, File for what
+ * you do with the document.
  */
 export function StudioHeader(p: Props) {
   const [open, setOpen] = useState(false)
@@ -55,16 +65,8 @@ export function StudioHeader(p: Props) {
       )}
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <PaneSwitch pane={p.pane} onChange={p.onPane} />
-        {!p.editing && (
-          <button
-            onClick={p.onUpload}
-            className="hidden rounded-lg px-2.5 py-1.5 text-sm text-ink-500
-                       transition-colors hover:bg-ink-800 hover:text-ink-100 md:inline-flex"
-          >
-            Upload a folder
-          </button>
-        )}
+        <ViewMenu {...p} />
+        <FileMenu {...p} />
 
         <div className="relative">
           <div className="flex overflow-hidden rounded-lg">
@@ -110,31 +112,60 @@ function TitleField({ value, onChange }: { value: string; onChange(v: string): v
   )
 }
 
-function PaneSwitch({ pane, onChange }: { pane: Pane; onChange(p: Pane): void }) {
-  const opts: [Pane, string, string][] = [
-    ['code', 'Code', 'M8 6 2 12l6 6M16 6l6 6-6 6'],
-    ['split', 'Both', 'M12 3v18M3 3h18v18H3z'],
-    ['preview', 'Preview', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z'],
-  ]
+const panes: [Pane, string, string][] = [
+  ['code', 'Code', 'M8 6 2 12l6 6M16 6l6 6-6 6'],
+  ['split', 'Code + preview', 'M12 3v18M3 3h18v18H3z'],
+  ['preview', 'Preview', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z'],
+]
+
+function PaneIcon({ pane }: { pane: Pane }) {
+  const path = panes.find(([id]) => id === pane)![2]
   return (
-    <div className="flex gap-0.5 rounded-lg bg-ink-900 p-0.5" role="group" aria-label="Visible panes">
-      {opts.map(([id, label, path]) => (
-        <button
-          key={id}
-          onClick={() => onChange(id)}
-          aria-pressed={pane === id}
-          title={label}
-          className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors ${
-            pane === id ? 'bg-ink-700 text-white' : 'text-ink-500 hover:text-ink-100'}`}
-        >
-          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-            <path d={path} />
-            {id === 'preview' && <circle cx="12" cy="12" r="3" />}
-          </svg>
-          <span className="hidden lg:inline">{label}</span>
-        </button>
+    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden>
+      <path d={path} />
+      {pane === 'preview' && <circle cx="12" cy="12" r="3" />}
+    </svg>
+  )
+}
+
+/** What is on screen: which panes, the conversation, the preview itself. */
+function ViewMenu(p: Props) {
+  const current = panes.find(([id]) => id === p.pane)!
+  return (
+    <Menu title="Choose what to see"
+      label={<><PaneIcon pane={p.pane} /><span className="hidden lg:inline">{current[1]}</span></>}>
+      <MenuLabel>Panes</MenuLabel>
+      {panes.map(([id, label]) => (
+        <MenuItem key={id} checked={p.pane === id} onClick={() => p.onPane(id)}>{label}</MenuItem>
       ))}
-    </div>
+      <MenuDivider />
+      <MenuItem onClick={p.onToggleChat}>{p.chatOpen ? 'Hide the conversation' : 'Show the conversation'}</MenuItem>
+      <MenuItem onClick={p.onReloadPreview} hint="Restart the artifact">Reload preview</MenuItem>
+      <MenuItem onClick={p.onOpenPreview} hint="Full window, still sandboxed">Open preview in a new tab</MenuItem>
+    </Menu>
+  )
+}
+
+/** What to do with the document, besides publishing it. */
+function FileMenu(p: Props) {
+  const nav = useNavigate()
+  return (
+    <Menu label="File" title="File actions">
+      {p.publishedPath && (
+        <MenuItem onClick={() => nav(p.publishedPath!)} hint="With its comments and history">
+          Open the published artifact
+        </MenuItem>
+      )}
+      {!p.editing && (
+        <MenuItem onClick={p.onUpload} hint="A whole site or app, with its assets">Upload a folder</MenuItem>
+      )}
+      <MenuItem onClick={p.onDownload} hint="This document as a .html file">Download HTML</MenuItem>
+      <MenuDivider />
+      <MenuItem onClick={p.onDiscard} danger disabled={!p.dirty}
+        hint={p.editing ? 'Back to the last published version' : 'Back to the empty starter'}>
+        Discard changes
+      </MenuItem>
+    </Menu>
   )
 }
 

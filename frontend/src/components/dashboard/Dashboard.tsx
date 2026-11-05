@@ -1,9 +1,10 @@
 import { useEffect, useMemo, useState } from 'react'
-import { Link } from 'react-router-dom'
-import { api, type Artifact } from '../../lib/api'
+import { Link, useLocation } from 'react-router-dom'
+import { api, type AccessRequest, type Artifact } from '../../lib/api'
 import { useSession } from '../../lib/session'
 import { agentInfo } from '../../lib/agents'
 import { ArtifactCard } from './ArtifactCard'
+import { AccessRequestList } from '../viewer/AccessRequestList'
 
 type Tab = 'all' | 'mine' | 'shared'
 
@@ -24,6 +25,16 @@ export function Dashboard() {
   // make the others disappear.
   const [knownAgents, setKnownAgents] = useState<string[]>([])
   const [err, setErr] = useState('')
+  const [requests, setRequests] = useState<AccessRequest[]>([])
+  const { hash } = useLocation()
+
+  useEffect(() => {
+    api.accessInbox().then((r) => setRequests(r.requests)).catch(() => { /* optional */ })
+  }, [])
+  // The sidebar links to /#requests; the router does not scroll to anchors.
+  useEffect(() => {
+    if (hash === '#requests' && requests.length) document.getElementById('requests')?.scrollIntoView({ behavior: 'smooth' })
+  }, [hash, requests.length])
 
   useEffect(() => {
     let alive = true
@@ -71,6 +82,19 @@ export function Dashboard() {
         </div>
       </header>
 
+      {requests.length > 0 && (
+        <section id="requests" className="mb-8">
+          <h2 className="mb-3 text-sm font-medium text-accent-400">
+            {requests.length === 1 ? 'Someone is asking for edit access' : `${requests.length} people are asking for edit access`}
+          </h2>
+          <AccessRequestList requests={requests} showArtifact
+            onDecided={(id) => {
+              setRequests((rs) => rs.filter((x) => x.id !== id))
+              window.dispatchEvent(new Event('falconia:requests'))
+            }} />
+        </section>
+      )}
+
       {firstRun ? <GetStarted /> : (
         <>
           {needsAttention.length > 0 && tab === 'all' && !agent && (
@@ -79,7 +103,7 @@ export function Dashboard() {
                 People left comments to address
               </h2>
               <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                {needsAttention.slice(0, 3).map((a) => <ArtifactCard key={a.id} a={a} />)}
+                {needsAttention.slice(0, 3).map((a) => <ArtifactCard key={a.id} a={a} onChange={(next) => setItems((xs) => (xs ?? []).flatMap((x) => x.id !== a.id ? [x] : next ? [next] : []))} />)}
               </div>
             </section>
           )}
@@ -121,7 +145,7 @@ export function Dashboard() {
             <Empty tab={tab} filtered={!!(query || agent)} />
           ) : (
             <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-              {items.map((a) => <ArtifactCard key={a.id} a={a} />)}
+              {items.map((a) => <ArtifactCard key={a.id} a={a} onChange={(next) => setItems((xs) => (xs ?? []).flatMap((x) => x.id !== a.id ? [x] : next ? [next] : []))} />)}
             </div>
           )}
         </>

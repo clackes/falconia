@@ -29,6 +29,10 @@ type Config struct {
 	// origin from AppBaseURL: that separation is what keeps the code inside an
 	// artifact away from the token of whoever is looking at it.
 	ContentBaseURL string
+	// ContentSameOrigin lets ContentBaseURL equal AppBaseURL, for a single
+	// hostname setup. The content server then relies on its CSP sandbox
+	// header alone to keep artifacts in an opaque origin.
+	ContentSameOrigin bool
 	// APIBaseURL is what the CLI and MCP clients put in their configuration.
 	APIBaseURL string
 
@@ -63,6 +67,7 @@ func Load() (*Config, error) {
 		DatabaseURL:       os.Getenv("DATABASE_URL"),
 		AppBaseURL:        strings.TrimRight(envOr("APP_BASE_URL", "http://localhost:5173"), "/"),
 		ContentBaseURL:    strings.TrimRight(envOr("CONTENT_BASE_URL", "http://localhost:8081"), "/"),
+		ContentSameOrigin: envOr("CONTENT_SAME_ORIGIN", "") == "true",
 		APIBaseURL:        strings.TrimRight(envOr("API_BASE_URL", "http://localhost:8080"), "/"),
 		AllowRegistration: envBool("ALLOW_REGISTRATION", true),
 		BlobBackend:       strings.ToLower(envOr("BLOB_BACKEND", "fs")),
@@ -92,10 +97,11 @@ func Load() (*Config, error) {
 	// If the two origins are the same, there is no isolation: an artifact
 	// would run in the same origin as the viewer's session. Better not to
 	// start than to start insecure while believing to be protected.
-	if appHost == contentHost {
+	if appHost == contentHost && !c.ContentSameOrigin {
 		return nil, fmt.Errorf(
 			"APP_BASE_URL and CONTENT_BASE_URL must be different origins (both are %s): "+
-				"untrusted artifacts cannot share the application's origin", appHost)
+				"untrusted artifacts cannot share the application's origin "+
+				"(set CONTENT_SAME_ORIGIN=true to accept it)", appHost)
 	}
 
 	c.JWTSecret, err = secretFromEnv("JWT_SECRET")
