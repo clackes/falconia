@@ -2,9 +2,12 @@ package handlers
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/clackes/falconia/backend/internal/agents"
@@ -247,4 +250,37 @@ func emailOf(id *identity) string {
 		return ""
 	}
 	return id.User.Email
+}
+
+// accessLog writes one structured line per request.
+//
+// Health checks are left out: the container probes every thirty seconds and
+// would bury everything else. Query strings are left out too, because
+// /api/p/{token} carries a secret in the path and some clients put tokens in
+// queries; the path of a link request is reduced to its prefix for the same
+// reason.
+func accessLog(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/health" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/api/p/") {
+				p = "/api/p/…"
+			}
+			level := slog.LevelInfo
+			if ww.Status() >= 500 {
+				level = slog.LevelError
+			}
+			logger.Log(r.Context(), level, "http",
+				"method", r.Method, "path", p, "status", ww.Status(),
+				"bytes", ww.BytesWritten(), "ms", time.Since(start).Milliseconds(),
+				"req_id", middleware.GetReqID(r.Context()))
+		})
+	}
 }

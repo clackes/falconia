@@ -71,3 +71,26 @@ func TestNormalizeSlug(t *testing.T) {
 		}
 	}
 }
+
+func TestTruncateKeepsUTF8(t *testing.T) {
+	s := "aé" // 'é' is two bytes
+	if got := truncate(s, 2); got != "a" {
+		t.Fatalf("got %q", got)
+	}
+	if got := truncate("abc", 10); got != "abc" {
+		t.Fatalf("got %q", got)
+	}
+}
+
+func TestValidEmail(t *testing.T) {
+	for _, e := range []string{"a@b", "x.y@team.example"} {
+		if !validEmail(e) {
+			t.Errorf("%q rejected", e)
+		}
+	}
+	for _, e := range []string{"", "nope", "@b", "a@", "a@b@c", "a b@c"} {
+		if validEmail(e) {
+			t.Errorf("%q accepted", e)
+		}
+	}
+}

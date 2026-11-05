@@ -28,8 +28,8 @@ type Share struct {
 
 func (p *Postgres) AddShare(ctx context.Context, artifactID, invitedBy uuid.UUID, email, role string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || !strings.Contains(email, "@") {
-		return errors.New("invalid email")
+	if !validEmail(email) {
+		return invalid("invalid email")
 	}
 	if role != "editor" {
 		role = "viewer"
@@ -119,9 +119,16 @@ type Membership struct {
 
 // CreateOrg founds a team, creates its space and adds the founder as owner.
 func (p *Postgres) CreateOrg(ctx context.Context, name, slug string, byUser uuid.UUID) (*Org, error) {
+	name = strings.TrimSpace(name)
+	if len(name) > 100 {
+		return nil, invalid("the team name is too long")
+	}
 	base := normalizeSlug(firstNonEmpty(slug, name))
 	if base == "" {
-		return nil, errors.New("invalid team name")
+		return nil, invalid("invalid team name")
+	}
+	if len(base) > 60 {
+		base = strings.Trim(base[:60], "-")
 	}
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
@@ -240,29 +247,62 @@ func (p *Postgres) ListOrgMembers(ctx context.Context, orgID uuid.UUID) ([]Membe
 	return out, rows.Err()
 }
 
+// ErrLastOwner is returned when an operation would leave a team without an
+// owner: a team nobody can administer is a dead end you can only get out of
+// through the database.
+var ErrLastOwner = errors.New("last owner")
+
 // InviteToOrg adds people who already have an account right away and parks
 // the others as pending invites. It returns "member" or "invite" so the
 // interface can say the right thing.
-func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, email, role string) (string, error) {
+//
+// byRole is the inviter's own role, and it bounds what they can hand out:
+// only an owner can make someone an owner or change an owner's role. Without
+// that rule an admin could promote themselves, or quietly demote every owner
+// by "re-inviting" them as members.
+func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, byRole, email, role string) (string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if email == "" || !strings.Contains(email, "@") {
-		return "", errors.New("invalid email")
+	if !validEmail(email) {
+		return "", invalid("invalid email")
 	}
 	switch role {
 	case "owner", "admin", "member":
 	default:
 		role = "member"
 	}
+	if role == "owner" && byRole != "owner" {
+		return "", ErrForbidden
+	}
+
 	u, err := p.GetUserByEmail(ctx, email)
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return "", err
+	}
 	if err == nil {
-		_, err = p.pool.Exec(ctx, `
+		tx, err := p.pool.Begin(ctx)
+		if err != nil {
+			return "", err
+		}
+		defer tx.Rollback(ctx)
+		owners, current, err := lockOwners(ctx, tx, orgID, u.ID)
+		if err != nil {
+			return "", err
+		}
+		if current == "owner" && role != "owner" {
+			if byRole != "owner" {
+				return "", ErrForbidden
+			}
+			if owners <= 1 {
+				return "", ErrLastOwner
+			}
+		}
+		if _, err := tx.Exec(ctx, `
 			INSERT INTO org_members (org_id, user_id, role) VALUES ($1,$2,$3)
 			ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
-			orgID, u.ID, role)
-		return "member", err
-	}
-	if !errors.Is(err, ErrNotFound) {
-		return "", err
+			orgID, u.ID, role); err != nil {
+			return "", err
+		}
+		return "member", tx.Commit(ctx)
 	}
 	_, err = p.pool.Exec(ctx, `
 		INSERT INTO org_invites (org_id, email, role, invited_by) VALUES ($1,$2,$3,$4)
@@ -271,27 +311,73 @@ func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, ema
 	return "invite", err
 }
 
-func (p *Postgres) RemoveOrgMember(ctx context.Context, orgID, userID uuid.UUID) error {
-	// The last owner cannot be removed: a team nobody can administer is a dead
-	// end you can only get out of through the database.
-	var owners int
-	if err := p.pool.QueryRow(ctx,
-		`SELECT COUNT(*) FROM org_members WHERE org_id=$1 AND role='owner'`, orgID).Scan(&owners); err != nil {
-		return err
+// lockOwners locks the team's membership rows that matter for "is this the
+// last owner?" and returns the owner count and the target's current role ("" if
+// not a member). Locking them serializes two owners removing each other at the
+// same moment, which would otherwise both pass the check and leave nobody.
+func lockOwners(ctx context.Context, tx pgx.Tx, orgID, userID uuid.UUID) (int, string, error) {
+	rows, err := tx.Query(ctx, `
+		SELECT user_id, role FROM org_members
+		 WHERE org_id=$1 AND (role='owner' OR user_id=$2)
+		 FOR UPDATE`, orgID, userID)
+	if err != nil {
+		return 0, "", err
 	}
-	var role string
-	if err := p.pool.QueryRow(ctx,
-		`SELECT role FROM org_members WHERE org_id=$1 AND user_id=$2`, orgID, userID).Scan(&role); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
+	defer rows.Close()
+	owners, current := 0, ""
+	for rows.Next() {
+		var id uuid.UUID
+		var role string
+		if err := rows.Scan(&id, &role); err != nil {
+			return 0, "", err
 		}
+		if role == "owner" {
+			owners++
+		}
+		if id == userID {
+			current = role
+		}
+	}
+	return owners, current, rows.Err()
+}
+
+// RemoveOrgMember takes someone out of a team. byRole is the remover's role:
+// admins manage members and admins, only owners can remove an owner.
+func (p *Postgres) RemoveOrgMember(ctx context.Context, orgID uuid.UUID, byRole string, userID uuid.UUID) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
 		return err
 	}
-	if role == "owner" && owners <= 1 {
-		return ErrForbidden
+	defer tx.Rollback(ctx)
+	owners, current, err := lockOwners(ctx, tx, orgID, userID)
+	if err != nil {
+		return err
 	}
-	_, err := p.pool.Exec(ctx, `DELETE FROM org_members WHERE org_id=$1 AND user_id=$2`, orgID, userID)
-	return err
+	if current == "" {
+		return ErrNotFound
+	}
+	if current == "owner" {
+		if byRole != "owner" {
+			return ErrForbidden
+		}
+		if owners <= 1 {
+			return ErrLastOwner
+		}
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM org_members WHERE org_id=$1 AND user_id=$2`, orgID, userID); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// validEmail is a sanity check, not RFC 5322: one @ with something on both
+// sides and a sane length. Delivery is what really validates an address.
+func validEmail(email string) bool {
+	if len(email) > 254 || strings.ContainsAny(email, " \t\r\n") {
+		return false
+	}
+	local, domain, ok := strings.Cut(email, "@")
+	return ok && local != "" && domain != "" && !strings.Contains(domain, "@")
 }
 
 // AcceptPendingInvites turns invitations addressed to the email of whoever

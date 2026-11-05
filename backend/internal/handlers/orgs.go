@@ -38,7 +38,7 @@ func (a *api) addShare(w http.ResponseWriter, r *http.Request, art *storage.Arti
 	// People added by email get access whatever the general access is, like
 	// on a Google Doc: there is no visibility to flip.
 	if err := a.deps.Store.AddShare(r.Context(), art.ID, identityFrom(r).User.ID, in.Email, in.Role); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeStoreErr(w, err)
 		return
 	}
 	a.record(r, art.ID, storage.EventShare, 0, map[string]any{"email": strings.ToLower(in.Email)})
@@ -142,7 +142,7 @@ func (a *api) listOrgMembers(w http.ResponseWriter, r *http.Request, o *storage.
 	})
 }
 
-func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
+func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org, myRole string) {
 	var in struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
@@ -151,22 +151,34 @@ func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	outcome, err := a.deps.Store.InviteToOrg(r.Context(), o.ID, identityFrom(r).User.ID, in.Email, in.Role)
+	outcome, err := a.deps.Store.InviteToOrg(r.Context(), o.ID, identityFrom(r).User.ID, myRole, in.Email, in.Role)
+	if errors.Is(err, storage.ErrForbidden) {
+		writeErr(w, http.StatusForbidden, "only an owner can grant or change the owner role")
+		return
+	}
+	if errors.Is(err, storage.ErrLastOwner) {
+		writeErr(w, http.StatusConflict, "this is the last owner: make someone else owner first")
+		return
+	}
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeStoreErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"result": outcome})
 }
 
-func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
+func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage.Org, myRole string) {
 	uid, err := uuid.Parse(chi.URLParam(r, "uid"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	err = a.deps.Store.RemoveOrgMember(r.Context(), o.ID, uid)
+	err = a.deps.Store.RemoveOrgMember(r.Context(), o.ID, myRole, uid)
 	if errors.Is(err, storage.ErrForbidden) {
+		writeErr(w, http.StatusForbidden, "only an owner can remove another owner")
+		return
+	}
+	if errors.Is(err, storage.ErrLastOwner) {
 		writeErr(w, http.StatusConflict,
 			"this is the last owner: make someone else owner before removing them")
 		return
@@ -179,7 +191,9 @@ func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage
 }
 
 func (a *api) listOrgArtifacts(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
-	sp, err := a.deps.Store.GetSpaceByOrg(r.Context(), o.ID)
+	// Ensure, not get: the space is created after the team's own transaction,
+	// and a team whose space creation failed must heal on first use.
+	sp, err := a.deps.Store.EnsureOrgSpace(r.Context(), o.ID, o.Slug, o.Name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return

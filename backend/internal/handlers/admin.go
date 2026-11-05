@@ -93,15 +93,16 @@ func (a *api) adminGC(w http.ResponseWriter, r *http.Request) {
 	}
 	deleted := 0
 	for _, sha := range orphans {
-		if err := a.deps.Blobs.Delete(r.Context(), sha); err != nil {
+		ok, err := a.deps.Store.CollectBlob(r.Context(), sha, hours, func() error {
+			return a.deps.Blobs.Delete(r.Context(), sha)
+		})
+		if err != nil {
 			a.deps.Logger.Warn("gc blob", "sha", sha, "err", err)
 			continue
 		}
-		if err := a.deps.Store.ForgetBlob(r.Context(), sha); err != nil {
-			a.deps.Logger.Warn("gc row", "sha", sha, "err", err)
-			continue
+		if ok {
+			deleted++
 		}
-		deleted++
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"orphans": len(orphans), "deleted": deleted, "dry_run": false})
 }

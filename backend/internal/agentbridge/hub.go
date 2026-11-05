@@ -101,6 +101,11 @@ func (j *Job) Publish(e Event) {
 // No event is lost: a browser reconnecting mid-request resumes from the index
 // it has and gets everything it missed.
 func (j *Job) Since(ctx context.Context, from int) ([]Event, bool, error) {
+	// from comes from a query string: a negative index would panic on the
+	// slice below.
+	if from < 0 {
+		from = 0
+	}
 	for {
 		j.mu.Lock()
 		if from < len(j.history) {
@@ -192,8 +197,25 @@ func (h *Hub) Poll(ctx context.Context, userID uuid.UUID, runner, host, dir stri
 // Disconnect removes the agent when it shuts down gracefully.
 func (h *Hub) Disconnect(userID uuid.UUID) {
 	h.mu.Lock()
-	defer h.mu.Unlock()
+	b, ok := h.bridges[userID]
 	delete(h.bridges, userID)
+	h.mu.Unlock()
+	if ok {
+		failQueued(b, "the agent disconnected before picking up this request")
+	}
+}
+
+// failQueued ends every request still waiting in a bridge's queue. Without it
+// a browser streaming one of them would wait forever on an agent that is gone.
+func failQueued(b *Bridge, why string) {
+	for {
+		select {
+		case job := <-b.queue:
+			job.Publish(Event{Type: EventError, Text: why})
+		default:
+			return
+		}
+	}
 }
 
 // Status tells the interface whether an agent is on the other end.
@@ -246,21 +268,34 @@ func (h *Hub) Job(userID, jobID uuid.UUID) (*Job, error) {
 }
 
 // sweep drops old requests and agents that stopped checking in.
+//
+// A request dropped here is first marked as failed: someone may still be
+// streaming it, and they deserve an ending rather than a spinner.
 func (h *Hub) sweep() {
 	tick := time.NewTicker(time.Minute)
 	for range tick.C {
 		cutoff := time.Now().Add(-30 * time.Minute)
+		var expired []*Job
+		var gone []*Bridge
 		h.mu.Lock()
 		for id, j := range h.jobs {
 			if j.CreatedAt.Before(cutoff) {
+				expired = append(expired, j)
 				delete(h.jobs, id)
 			}
 		}
 		for id, b := range h.bridges {
 			if time.Since(b.LastSeen) > staleAfter {
+				gone = append(gone, b)
 				delete(h.bridges, id)
 			}
 		}
 		h.mu.Unlock()
+		for _, j := range expired {
+			j.Publish(Event{Type: EventError, Text: "the request timed out"})
+		}
+		for _, b := range gone {
+			failQueued(b, "the agent stopped responding before picking up this request")
+		}
 	}
 }

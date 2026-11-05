@@ -82,9 +82,16 @@ func (a *api) uploadBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid sha256")
 		return
 	}
-	if have, err := a.deps.Blobs.Has(r.Context(), want); err == nil && have {
-		// Already there: the upload is idempotent and there is nothing to do.
+	// The database row, not the bytes, decides "already there": bytes without
+	// a row are either garbage about to be collected or the leftover of an
+	// upload whose second half failed, and in both cases the row must be
+	// written now or the next deploy will be told the file is still missing.
+	if have, err := a.deps.Store.HasBlobRow(r.Context(), want); err == nil && have {
 		writeJSON(w, http.StatusOK, map[string]any{"sha256": want, "stored": false})
+		return
+	}
+	if r.ContentLength > a.deps.MaxUploadBytes {
+		writeErr(w, http.StatusRequestEntityTooLarge, "file too large")
 		return
 	}
 
@@ -118,15 +125,13 @@ func (a *api) uploadBlob(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	if err := a.deps.Blobs.Put(r.Context(), got, tmp, size); err != nil {
+	// Bytes first, then the row, under the blob's lock: a blob without a row
+	// is collectable garbage, a row without bytes is a broken artifact.
+	if err := a.deps.Store.StoreBlob(r.Context(), got, size, func() error {
+		return a.deps.Blobs.Put(r.Context(), got, tmp, size)
+	}); err != nil {
 		a.deps.Logger.Error("blob put", "err", err)
 		writeErr(w, http.StatusInternalServerError, "write failed")
-		return
-	}
-	// Bytes first, then the row: a blob without a row is collectable garbage,
-	// a row without bytes is a broken artifact.
-	if err := a.deps.Store.RegisterBlob(r.Context(), got, size); err != nil {
-		writeStoreErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{"sha256": got, "size": size, "stored": true})
@@ -364,6 +369,15 @@ func (a *api) validateManifest(r *http.Request, in *deployReq) ([]storage.FileSp
 	}
 	if len(missing) > 0 {
 		return nil, "", errors.New(strconv.Itoa(len(missing)) + " files are still missing: upload them before deploying")
+	}
+	// The declared sizes are the client's word; the sizes recorded when the
+	// bytes were hashed are the truth, and they end up in Content-Length.
+	sizes, err := a.deps.Store.BlobSizes(r.Context(), shas)
+	if err != nil {
+		return nil, "", errors.New("internal error")
+	}
+	for i := range out {
+		out[i].Size = sizes[out[i].SHA256]
 	}
 
 	if entry == "" || !seen[entry] {

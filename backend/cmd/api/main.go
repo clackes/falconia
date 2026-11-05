@@ -57,9 +57,7 @@ func main() {
 		logger.Error("migration", "err", err)
 		os.Exit(1)
 	}
-	if err := store.PurgeExpiredDeviceCodes(ctx); err != nil {
-		logger.Warn("device code cleanup", "err", err)
-	}
+	go janitor(ctx, store, logger)
 
 	blobs, err := openBlobStore(ctx, cfg)
 	if err != nil {
@@ -86,6 +84,7 @@ func main() {
 			Logger:            logger,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 		// No global WriteTimeout: /api/chat streams SSE for minutes, and a
 		// write timeout would cut it off mid-sentence.
 		IdleTimeout: 120 * time.Second,
@@ -101,6 +100,7 @@ func main() {
 			Logger:    logger,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    64 << 10,
 		WriteTimeout:      120 * time.Second,
 		IdleTimeout:       120 * time.Second,
 	}
@@ -131,6 +131,24 @@ func main() {
 	<-done
 	<-done
 	logger.Info("stopped")
+}
+
+// janitor deletes expired CLI login codes, at startup and then every hour.
+// Running it only at startup let the table grow for as long as the process
+// lived, one row per abandoned `falconia login`.
+func janitor(ctx context.Context, store *storage.Postgres, logger *slog.Logger) {
+	tick := time.NewTicker(time.Hour)
+	defer tick.Stop()
+	for {
+		if err := store.PurgeExpiredDeviceCodes(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("device code cleanup", "err", err)
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+		}
+	}
 }
 
 func serve(s *http.Server, name string, logger *slog.Logger) {

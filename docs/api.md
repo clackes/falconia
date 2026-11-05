@@ -8,6 +8,10 @@ Anonymous routes: `/api/health`, `/api/config`, sign-in, the CLI installer, and
 `/api/p/{token}` — the artifacts their owners shared with "anyone with the
 link".
 
+`/api/health` checks the database too and answers `503` when it is
+unreachable. Errors are `{"error": "..."}`: `400` carries a message meant for
+the person, `500` never carries internal details.
+
 ## What a key can do
 
 Always less than the person who issued it:
@@ -47,7 +51,7 @@ convention.
 | | |
 | --- | --- |
 | `POST /api/auth/register` | `{email, password, display_name}` → `{token, user}` |
-| `POST /api/auth/login` | `{email, password}` → `{token, user}` |
+| `POST /api/auth/login` | `{email, password}` → `{token, user}`; `429` after 10 failures on one account in 15 minutes |
 | `GET /api/auth/me` | → `{user, spaces}` |
 
 ### Command-line login
@@ -179,8 +183,8 @@ visible in the side panel.
 | | |
 | --- | --- |
 | `GET/POST /api/orgs` | |
-| `GET/POST /api/orgs/{id}/members` | |
-| `DELETE /api/orgs/{id}/members/{uid}` | the last owner cannot be removed |
+| `GET/POST /api/orgs/{id}/members` | only an owner can grant the owner role or change an owner's role |
+| `DELETE /api/orgs/{id}/members/{uid}` | only an owner can remove an owner; the last owner cannot be removed or demoted (`409`) |
 | `GET /api/orgs/{id}/artifacts` | |
 
 ## Keys and administration
@@ -190,7 +194,7 @@ visible in the side panel.
 | `GET/POST /api/keys`, `DELETE /api/keys/{id}` | session only |
 | `GET /api/admin/stats`, `/users`, `/events` | admins only |
 | `POST /api/admin/users/{id}/role` | `{is_admin}` |
-| `POST /api/admin/gc?dry_run=false` | frees orphan blobs |
+| `POST /api/admin/gc?dry_run=false&older_than_hours=24` | frees blobs no version references and nobody asked about in that window |
 
 ## Built-in chat
 
@@ -198,6 +202,12 @@ visible in the side panel.
 system?, messages}` with `provider` among `anthropic`, `openai`, `gemini`,
 `openrouter`, `local`, `custom`. The key is used for this request only and never
 stored. What the chat publishes is labeled `chat:<model>`.
+
+It needs a signed-in session: the chat runs every tool with the person's full
+rights, so an API key is refused rather than allowed to escape its scopes.
+`base_url` must be a plain `http(s)` URL (no credentials, query or fragment);
+loopback and private addresses work, link-local ones — where cloud metadata
+services live — are refused.
 
 ## Local agent bridge
 

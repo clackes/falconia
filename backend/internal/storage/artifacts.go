@@ -128,6 +128,13 @@ type CreateArtifactInput struct {
 	// Bundle fields. When Files is empty the version is a single document.
 	EntryPath string
 	Files     []FileSpec
+
+	forkOf *forkOrigin
+}
+
+type forkOrigin struct {
+	parentID uuid.UUID
+	version  int
 }
 
 // ValidVisibility normalizes a visibility that came from outside.
@@ -389,6 +396,8 @@ const visibleWhere = `(
 	         WHERE lv.artifact_id = a.id AND lv.user_id = $1))
 )`
 
+var likeEscaper = strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`)
+
 // ListVisibleTo returns the artifacts a person can actually open, most
 // recently updated first.
 func (p *Postgres) ListVisibleTo(ctx context.Context, userID uuid.UUID, email string, opt ListFeedOptions) ([]Artifact, error) {
@@ -404,8 +413,10 @@ func (p *Postgres) ListVisibleTo(ctx context.Context, userID uuid.UUID, email st
 
 	where := visibleWhere
 	if opt.Query != "" {
-		ph := arg(opt.Query)
-		where += ` AND (a.title ILIKE '%'||` + ph + `||'%' OR a.description ILIKE '%'||` + ph + `||'%')`
+		// The search is a substring, not a pattern: % and _ typed by a person
+		// mean themselves, so they are escaped before reaching ILIKE.
+		ph := arg(likeEscaper.Replace(opt.Query))
+		where += ` AND (a.title ILIKE '%'||` + ph + `||'%' ESCAPE '\' OR a.description ILIKE '%'||` + ph + `||'%' ESCAPE '\')`
 	}
 	if opt.Category != "" {
 		where += ` AND a.category = ` + arg(opt.Category)
@@ -493,10 +504,6 @@ func (p *Postgres) CreateArtifact(ctx context.Context, authorID uuid.UUID, in Cr
 	if err != nil {
 		return nil, nil, err
 	}
-	slug, err := p.freeArtifactSlug(ctx, in.SpaceID, firstNonEmpty(in.Slug, in.Title))
-	if err != nil {
-		return nil, nil, err
-	}
 	visibility := ValidVisibility(in.Visibility)
 	if visibility == "org" && sp.Kind != "org" {
 		// A personal space has no team to share with.
@@ -511,6 +518,25 @@ func (p *Postgres) CreateArtifact(ctx context.Context, authorID uuid.UUID, in Cr
 		linkToken = &tok
 	}
 
+	// freeArtifactSlug only probes: two deploys asking for the same slug at
+	// the same moment can both be told it is free, and the second insert then
+	// hits the unique index. That is the case the counter exists for, so the
+	// loser picks the next free slug and tries again instead of failing.
+	for attempt := 0; ; attempt++ {
+		slug, err := p.freeArtifactSlug(ctx, in.SpaceID, firstNonEmpty(in.Slug, in.Title))
+		if err != nil {
+			return nil, nil, err
+		}
+		a, v, err := p.insertArtifact(ctx, authorID, sp, in, slug, visibility, linkToken, forkable)
+		if err != nil && isUniqueViolation(err) && slug != "" && attempt < 5 {
+			continue
+		}
+		return a, v, err
+	}
+}
+
+func (p *Postgres) insertArtifact(ctx context.Context, authorID uuid.UUID, sp *Space, in CreateArtifactInput,
+	slug, visibility string, linkToken *string, forkable bool) (*Artifact, *ArtifactVersion, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return nil, nil, err
@@ -542,6 +568,16 @@ func (p *Postgres) CreateArtifact(ctx context.Context, authorID uuid.UUID, in Cr
 	}, 1)
 	if err != nil {
 		return nil, nil, err
+	}
+	// The fork relation is written in the same transaction as the artifact:
+	// a fork that exists without knowing its parent would be an orphan copy.
+	if in.forkOf != nil {
+		if _, err := tx.Exec(ctx,
+			`INSERT INTO fork_relations (child_artifact_id, parent_artifact_id, forked_from_version)
+			 VALUES ($1,$2,$3)`, a.ID, in.forkOf.parentID, in.forkOf.version); err != nil {
+			return nil, nil, err
+		}
+		a.ForkParentID = &in.forkOf.parentID
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, nil, err
@@ -667,6 +703,10 @@ func (p *Postgres) UpdateMeta(ctx context.Context, id uuid.UUID, m ArtifactMeta)
 		 WHERE id=$1`,
 		id, m.Title, m.Description, visibility, ValidTeamRole(m.TeamRole), linkToken, m.Icon,
 		m.ThemeColor, m.LogoURL, nilIfEmpty(slug), m.Forkable, m.Category)
+	if isUniqueViolation(err) {
+		// Someone took the slug between the probe and the update.
+		return ErrConflict
+	}
 	if err != nil {
 		return err
 	}
@@ -719,6 +759,9 @@ func (p *Postgres) MoveToSpace(ctx context.Context, artifactID, spaceID uuid.UUI
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE artifacts SET space_id=$2, owner_org_id=$3, slug=$4, visibility=$5, updated_at=NOW() WHERE id=$1`,
 		artifactID, sp.ID, sp.OrgID, nilIfEmpty(slug), visibility)
+	if isUniqueViolation(err) {
+		return ErrConflict
+	}
 	if err != nil {
 		return err
 	}
@@ -775,13 +818,9 @@ func (p *Postgres) Fork(ctx context.Context, sourceID, newAuthorID, spaceID uuid
 		LogoURL: src.LogoURL, Slug: title, Category: src.Category,
 		Visibility: "private", EntryPath: srcV.EntryPath, Files: specs,
 		Message: fmt.Sprintf("forked from %s v%d", src.Title, srcV.VersionNumber),
+		forkOf:  &forkOrigin{parentID: sourceID, version: srcV.VersionNumber},
 	})
 	if err != nil {
-		return nil, nil, err
-	}
-	if _, err := p.pool.Exec(ctx,
-		`INSERT INTO fork_relations (child_artifact_id, parent_artifact_id, forked_from_version)
-		 VALUES ($1,$2,$3)`, a.ID, sourceID, srcV.VersionNumber); err != nil {
 		return nil, nil, err
 	}
 	return a, v, nil

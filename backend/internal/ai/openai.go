@@ -17,7 +17,7 @@ func RunOpenAICompat(ctx context.Context, endpointBase, apiKey, model string, me
 	if endpointBase == "" {
 		endpointBase = "https://api.openai.com/v1"
 	}
-	httpc := &http.Client{}
+	httpc := httpClient
 
 	// Build the initial message list.
 	convo := []map[string]any{}

@@ -78,13 +78,10 @@ func (p *Publisher) Put(ctx context.Context, f File) (storage.FileSpec, []byte, 
 	}
 	sum := sha256.Sum256(data)
 	sha := hex.EncodeToString(sum[:])
-	if have, err := p.Blobs.Has(ctx, sha); err != nil || !have {
-		if err := p.Blobs.Put(ctx, sha, bytes.NewReader(data), int64(len(data))); err != nil {
-			return storage.FileSpec{}, nil, err
-		}
-	}
-	// Bytes first, then the row: see storage.RegisterBlob.
-	if err := p.Store.RegisterBlob(ctx, sha, int64(len(data))); err != nil {
+	// Bytes first, then the row, under the blob's lock: see storage.StoreBlob.
+	if err := p.Store.StoreBlob(ctx, sha, int64(len(data)), func() error {
+		return p.Blobs.Put(ctx, sha, bytes.NewReader(data), int64(len(data)))
+	}); err != nil {
 		return storage.FileSpec{}, nil, err
 	}
 	return storage.FileSpec{Path: clean, SHA256: sha, Size: int64(len(data)), ContentType: ContentType(clean)}, data, nil

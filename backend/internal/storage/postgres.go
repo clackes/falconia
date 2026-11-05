@@ -7,6 +7,7 @@ import (
 	"errors"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -20,6 +21,26 @@ var (
 	ErrForbidden = errors.New("forbidden")
 	ErrConflict  = errors.New("conflict")
 )
+
+// InvalidError is input the caller can fix: an empty comment, a malformed
+// email. It carries a message meant for the person, and the HTTP layer turns
+// it into a 400. Anything that is not an InvalidError is a server problem and
+// its text never reaches the client, because database errors name tables,
+// constraints and sometimes values.
+type InvalidError struct{ Msg string }
+
+func (e *InvalidError) Error() string { return e.Msg }
+
+func invalid(msg string) error { return &InvalidError{Msg: msg} }
+
+// IsInvalid reports whether err is an InvalidError, and returns its message.
+func IsInvalid(err error) (string, bool) {
+	var ie *InvalidError
+	if errors.As(err, &ie) {
+		return ie.Msg, true
+	}
+	return "", false
+}
 
 type Postgres struct{ pool *pgxpool.Pool }
 
@@ -73,22 +94,38 @@ func scanUser(row pgx.Row) (*User, error) {
 	return u, err
 }
 
+// signupLockID serializes sign-ups. Any constant works as long as no other
+// advisory lock in the code uses it.
+const signupLockID = 0x53464101
+
 // CreateUser registers a person and sets up their personal space right away.
 //
 // The first user of the instance becomes its administrator: that is whoever
 // ran the setup on the server, and without this rule nobody could ever become
-// one. The check and the insert share a transaction, so two simultaneous
-// sign-ups on an empty instance do not accidentally produce two admins.
-func (p *Postgres) CreateUser(ctx context.Context, email, displayName, passwordHash string) (*User, error) {
+// one. A transaction alone does not make that safe: under READ COMMITTED two
+// simultaneous sign-ups on an empty instance would both see no users and both
+// become admin. The transaction-scoped advisory lock makes the check and the
+// insert one step.
+//
+// onlyIfEmpty is for instances with sign-up closed: the first account may
+// still be created, and the lock guarantees it is the only one, instead of
+// leaving a window in which several "first" accounts slip in.
+func (p *Postgres) CreateUser(ctx context.Context, email, displayName, passwordHash string, onlyIfEmpty bool) (*User, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
 
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, signupLockID); err != nil {
+		return nil, err
+	}
 	var anyUser bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&anyUser); err != nil {
 		return nil, err
+	}
+	if anyUser && onlyIfEmpty {
+		return nil, ErrForbidden
 	}
 	u := &User{
 		ID: uuid.New(), Email: email, DisplayName: displayName,
@@ -252,6 +289,24 @@ func sanitizeScopes(in []string) []string {
 // CreateAPIKey issues a key. The clear value only exists here: it is returned
 // once and never again, because the database only holds its bcrypt hash.
 func (p *Postgres) CreateAPIKey(ctx context.Context, userID uuid.UUID, label, kind string, scopes []string, ttl time.Duration) (*APIKey, string, error) {
+	return createAPIKey(ctx, p.pool, userID, label, kind, scopes, ttl)
+}
+
+// execer is what pgxpool.Pool and pgx.Tx have in common, so a write can run
+// either on its own or inside a caller's transaction.
+type execer interface {
+	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
+}
+
+// maxKeyTTL bounds a key's lifetime. Beyond it time.Duration would overflow
+// and the "expiring" key would never expire.
+const maxKeyTTL = 10 * 365 * 24 * time.Hour
+
+func createAPIKey(ctx context.Context, db execer, userID uuid.UUID, label, kind string, scopes []string, ttl time.Duration) (*APIKey, string, error) {
+	label = truncate(strings.TrimSpace(label), 200)
+	if ttl > maxKeyTTL || ttl < 0 {
+		ttl = maxKeyTTL
+	}
 	if label == "" {
 		label = "API key"
 	}
@@ -276,7 +331,7 @@ func (p *Postgres) CreateAPIKey(ctx context.Context, userID uuid.UUID, label, ki
 		exp := time.Now().Add(ttl)
 		k.ExpiresAt = &exp
 	}
-	_, err = p.pool.Exec(ctx,
+	_, err = db.Exec(ctx,
 		`INSERT INTO pat_tokens (id, user_id, label, prefix, secret_hash, scopes, kind, expires_at, created_at)
 		 VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)`,
 		k.ID, k.UserID, k.Label, k.Prefix, string(hash), k.Scopes, k.Kind, k.ExpiresAt, k.CreatedAt)
@@ -398,9 +453,25 @@ func normalizeSlug(s string) string {
 	return strings.Trim(b.String(), "-")
 }
 
+// truncate cuts s to at most n bytes without splitting a UTF-8 sequence:
+// Postgres rejects invalid UTF-8, so a blind byte slice would turn a long
+// label into a 500.
+func truncate(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
+}
+
 func nilIfEmpty(s string) *string {
 	if s == "" {
 		return nil
 	}
 	return &s
 }
+
+// Ping checks that the database answers, for the health endpoint.
+func (p *Postgres) Ping(ctx context.Context) error { return p.pool.Ping(ctx) }

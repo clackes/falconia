@@ -59,6 +59,7 @@ func hashDeviceCode(s string) string {
 // code). Only the hash of the former is stored: someone reading the database
 // cannot steal a login waiting for approval.
 func (p *Postgres) StartDeviceLogin(ctx context.Context, label string, ttl time.Duration) (deviceCode string, dc *DeviceCode, err error) {
+	label = truncate(strings.TrimSpace(label), 200)
 	if label == "" {
 		label = "falconia cli"
 	}
@@ -114,28 +115,45 @@ func (p *Postgres) FindDeviceByUserCode(ctx context.Context, userCode string) (*
 }
 
 // ApproveDeviceLogin confirms the login and issues the key the CLI will collect.
+//
+// The key is created in the same transaction that marks the code approved,
+// with the row locked: two approvals racing on the same code (a double click,
+// two tabs) would otherwise each mint a year-long key, and the one that lost
+// the race would stay valid with nobody holding it.
 func (p *Postgres) ApproveDeviceLogin(ctx context.Context, userCode string, userID uuid.UUID) error {
 	d, err := p.FindDeviceByUserCode(ctx, userCode)
 	if err != nil {
 		return err
 	}
-	if d.ApprovedBy != nil {
-		return ErrConflict
-	}
-	_, token, err := p.CreateAPIKey(ctx, userID, d.Label, "cli", AllScopes, 365*24*time.Hour)
+	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return err
 	}
-	tag, err := p.pool.Exec(ctx, `
-		UPDATE device_codes SET approved_by=$2, approved_at=NOW(), issued_token=$3
-		 WHERE id=$1 AND approved_by IS NULL`, d.ID, userID, token)
+	defer tx.Rollback(ctx)
+
+	var approved bool
+	err = tx.QueryRow(ctx,
+		`SELECT approved_by IS NOT NULL FROM device_codes WHERE id=$1 AND expires_at > NOW() FOR UPDATE`,
+		d.ID).Scan(&approved)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
 	if err != nil {
 		return err
 	}
-	if tag.RowsAffected() == 0 {
+	if approved {
 		return ErrConflict
 	}
-	return nil
+	_, token, err := createAPIKey(ctx, tx, userID, d.Label, "cli", AllScopes, 365*24*time.Hour)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE device_codes SET approved_by=$2, approved_at=NOW(), issued_token=$3 WHERE id=$1`,
+		d.ID, userID, token); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 // PollDeviceLogin is what the CLI calls in a loop.

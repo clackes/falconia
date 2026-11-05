@@ -51,6 +51,7 @@ func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
 	r.Use(middleware.RealIP)
+	r.Use(accessLog(d.Logger))
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())
 	r.Use(corsMW(d.AppBaseURL))
@@ -155,7 +156,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Post("/api/admin/gc", a.adminOnly(a.adminGC))
 
 	// --- Built-in chat with the person's own model (BYOK) ---
-	r.Post("/api/chat", a.auth(a.aiChat))
+	// Human only: the chat runs every tool with the user's full rights, so a
+	// key reaching it would escape its own scopes (a read-only key driving a
+	// model that deploys and shares).
+	r.Post("/api/chat", a.humanOnly(a.aiChat))
 
 	// --- Local agent bridge ---
 	//

@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"context"
 	"errors"
 	"net/http"
 	"strconv"
@@ -23,7 +24,18 @@ var Version = "dev"
 
 type api struct{ deps Deps }
 
+// health answers the container healthcheck and the load balancer. It checks
+// the database, because a backend that cannot reach Postgres answers every
+// real request with a 500 and should be taken out of rotation, not reported
+// healthy.
 func (a *api) health(w http.ResponseWriter, r *http.Request) {
+	ctx, cancel := context.WithTimeout(r.Context(), 2*time.Second)
+	defer cancel()
+	if err := a.deps.Store.Ping(ctx); err != nil {
+		a.deps.Logger.Warn("health: database unreachable", "err", err)
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"ok": false, "version": Version, "error": "database unreachable"})
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "version": Version, "ts": time.Now().UTC()})
 }
 
@@ -62,7 +74,8 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if !a.deps.AllowRegistration && !a.noUsersYet(r) {
+	closed := !a.deps.AllowRegistration
+	if closed && !a.noUsersYet(r) {
 		writeErr(w, http.StatusForbidden, "sign-up is closed on this instance: ask for an invitation")
 		return
 	}
@@ -72,8 +85,23 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid email")
 		return
 	}
+	if len(in.Email) > 254 {
+		writeErr(w, http.StatusBadRequest, "invalid email")
+		return
+	}
 	if len(in.Password) < 10 {
 		writeErr(w, http.StatusBadRequest, "the password must be at least 10 characters long")
+		return
+	}
+	// bcrypt only reads the first 72 bytes: anything past that would be
+	// silently ignored, and a person who thinks their long passphrase protects
+	// them should be told instead.
+	if len(in.Password) > 72 {
+		writeErr(w, http.StatusBadRequest, "the password must be at most 72 bytes long")
+		return
+	}
+	if len(in.DisplayName) > 100 {
+		writeErr(w, http.StatusBadRequest, "the display name is too long")
 		return
 	}
 	if in.DisplayName == "" {
@@ -84,7 +112,14 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusInternalServerError, "internal error")
 		return
 	}
-	u, err := a.deps.Store.CreateUser(r.Context(), in.Email, in.DisplayName, string(hash))
+	// With sign-up closed only the very first account may be created; the
+	// store checks that again under a lock, so two people racing on a fresh
+	// install cannot both get in.
+	u, err := a.deps.Store.CreateUser(r.Context(), in.Email, in.DisplayName, string(hash), closed)
+	if errors.Is(err, storage.ErrForbidden) {
+		writeErr(w, http.StatusForbidden, "sign-up is closed on this instance: ask for an invitation")
+		return
+	}
 	if errors.Is(err, storage.ErrConflict) {
 		writeErr(w, http.StatusConflict, "an account with this email already exists")
 		return
@@ -103,14 +138,32 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	u, err := a.deps.Store.GetUserByEmail(r.Context(), strings.ToLower(strings.TrimSpace(in.Email)))
-	if err != nil || u.PasswordHash == "" ||
-		bcrypt.CompareHashAndPassword([]byte(u.PasswordHash), []byte(in.Password)) != nil {
+	email := strings.ToLower(strings.TrimSpace(in.Email))
+	// Failures are counted per account, not per address: the address comes
+	// from proxy headers anyone can forge, the account under attack does not.
+	if !loginLimiter.allow(email) {
+		writeErr(w, http.StatusTooManyRequests, "too many failed attempts: try again in a few minutes")
+		return
+	}
+	u, err := a.deps.Store.GetUserByEmail(r.Context(), email)
+	hash := dummyHash
+	if err == nil && u.PasswordHash != "" {
+		hash = []byte(u.PasswordHash)
+	}
+	// The comparison runs even for an unknown email, against a throwaway hash:
+	// answering an unknown address in a millisecond and a known one in eighty
+	// would tell anyone with a stopwatch who has an account.
+	if bcrypt.CompareHashAndPassword(hash, []byte(in.Password)) != nil || err != nil || u.PasswordHash == "" {
+		if err != nil && !errors.Is(err, storage.ErrNotFound) {
+			a.deps.Logger.Error("login lookup", "err", err)
+		}
+		loginLimiter.fail(email)
 		// One message for both "unknown email" and "wrong password": telling
 		// them apart would let anyone find out who has an account.
 		writeErr(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
+	loginLimiter.reset(email)
 	_ = a.deps.Store.AcceptPendingInvites(r.Context(), u.ID, u.Email)
 	a.issueSession(w, u, http.StatusOK)
 }
@@ -153,7 +206,11 @@ func (a *api) listSpaces(w http.ResponseWriter, r *http.Request) {
 func (a *api) resolveSpace(r *http.Request, ref string) (*storage.Space, error) {
 	ref = strings.TrimSpace(ref)
 	if ref == "" {
-		return a.deps.Store.GetSpaceByOwner(r.Context(), identityFrom(r).User.ID)
+		// Ensure rather than get: the personal space is created right after
+		// sign-up, outside the user's transaction, and an account whose space
+		// creation failed must heal on first use instead of 404ing forever.
+		u := identityFrom(r).User
+		return a.deps.Store.EnsurePersonalSpace(r.Context(), u.ID, u.Email, u.DisplayName)
 	}
 	if id, err := uuid.Parse(ref); err == nil {
 		return a.deps.Store.GetSpace(r.Context(), id)
