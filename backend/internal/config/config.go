@@ -11,6 +11,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"os"
 	"strconv"
@@ -54,6 +55,32 @@ type Config struct {
 
 	MaxUploadBytes int64
 	MaxBundleFiles int
+
+	// SMTP sends verification and invitation emails. Empty Host means the
+	// instance has no mail server.
+	SMTP SMTPConfig
+	// RequireEmailVerification decides whether an unverified address unlocks
+	// what was shared with it. EMAIL_VERIFICATION=auto (the default) requires
+	// it exactly when SMTP is configured, because without a mail server
+	// nobody could ever verify; "required" forces it (people then verify
+	// through invitation links or an administrator), "off" disables it.
+	RequireEmailVerification bool
+
+	// TrustedProxies are the networks whose X-Forwarded-For is believed. A
+	// header anyone can set is not an address: only the hop that connected to
+	// us, or a proxy we know, can say who the client is.
+	TrustedProxies []netip.Prefix
+}
+
+type SMTPConfig struct {
+	Host     string
+	Port     int
+	Username string
+	Password string
+	From     string
+	// Security is "starttls" (default, port 587), "tls" (implicit TLS, port
+	// 465) or "none" (a relay on localhost or a trusted network only).
+	Security string
 }
 
 func Load() (*Config, error) {
@@ -79,6 +106,46 @@ func Load() (*Config, error) {
 	}
 	if c.DatabaseURL == "" {
 		return nil, errors.New("DATABASE_URL is required")
+	}
+
+	c.SMTP = SMTPConfig{
+		Host:     os.Getenv("SMTP_HOST"),
+		Port:     envInt("SMTP_PORT", 587),
+		Username: os.Getenv("SMTP_USERNAME"),
+		Password: os.Getenv("SMTP_PASSWORD"),
+		From:     os.Getenv("SMTP_FROM"),
+		Security: strings.ToLower(envOr("SMTP_SECURITY", "starttls")),
+	}
+	switch c.SMTP.Security {
+	case "starttls", "tls", "none":
+	default:
+		return nil, fmt.Errorf("SMTP_SECURITY must be starttls, tls or none, got %q", c.SMTP.Security)
+	}
+	if c.SMTP.Host != "" && c.SMTP.From == "" {
+		return nil, errors.New("SMTP_FROM is required when SMTP_HOST is set")
+	}
+	switch strings.ToLower(envOr("EMAIL_VERIFICATION", "auto")) {
+	case "auto":
+		c.RequireEmailVerification = c.SMTP.Host != ""
+	case "required", "on", "true":
+		c.RequireEmailVerification = true
+	case "off", "false":
+		c.RequireEmailVerification = false
+	default:
+		return nil, errors.New("EMAIL_VERIFICATION must be auto, required or off")
+	}
+
+	proxies := envOr("TRUSTED_PROXIES", "127.0.0.0/8,::1/128,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16,fc00::/7")
+	for _, part := range strings.Split(proxies, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" || part == "none" {
+			continue
+		}
+		pfx, err := netip.ParsePrefix(part)
+		if err != nil {
+			return nil, fmt.Errorf("TRUSTED_PROXIES: %w", err)
+		}
+		c.TrustedProxies = append(c.TrustedProxies, pfx)
 	}
 
 	appHost, err := originOf(c.AppBaseURL)

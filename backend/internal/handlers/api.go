@@ -13,6 +13,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 
 	"github.com/clackes/falconia/backend/internal/agents"
+	"github.com/clackes/falconia/backend/internal/clientip"
 	"github.com/clackes/falconia/backend/internal/content"
 	"github.com/clackes/falconia/backend/internal/storage"
 	"github.com/clackes/falconia/backend/pkg/auth"
@@ -51,6 +52,10 @@ func (a *api) config(w http.ResponseWriter, r *http.Request) {
 		"allow_registration": a.deps.AllowRegistration || a.noUsersYet(r),
 		"max_upload_bytes":   a.deps.MaxUploadBytes,
 		"max_bundle_files":   a.deps.MaxBundleFiles,
+		// The interface uses these to decide whether to ask people to verify
+		// their address and whether "resend" can work at all.
+		"email_verification_required": a.deps.RequireEmailVerification,
+		"can_send_email":              a.deps.Mailer != nil,
 	})
 }
 
@@ -69,23 +74,37 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 		Email       string `json:"email"`
 		Password    string `json:"password"`
 		DisplayName string `json:"display_name"`
+		// InviteToken comes from a team invitation link. It proves the email
+		// (the link was sent there) and opens sign-up even when it is closed:
+		// that is what an invitation is for.
+		InviteToken string `json:"invite_token"`
 	}
 	if err := decode(r, &in); err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	closed := !a.deps.AllowRegistration
+	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
+	in.DisplayName = strings.TrimSpace(in.DisplayName)
+
+	var inv *storage.Invitation
+	if strings.TrimSpace(in.InviteToken) != "" {
+		found, err := a.deps.Store.LookupInvitation(r.Context(), in.InviteToken)
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, "this invitation link is invalid or has expired: ask for a new one")
+			return
+		}
+		if found.Email != in.Email {
+			writeErr(w, http.StatusBadRequest, "this invitation was sent to "+found.Email+": sign up with that address")
+			return
+		}
+		inv = found
+	}
+	closed := !a.deps.AllowRegistration && inv == nil
 	if closed && !a.noUsersYet(r) {
 		writeErr(w, http.StatusForbidden, "sign-up is closed on this instance: ask for an invitation")
 		return
 	}
-	in.Email = strings.ToLower(strings.TrimSpace(in.Email))
-	in.DisplayName = strings.TrimSpace(in.DisplayName)
-	if in.Email == "" || !strings.Contains(in.Email, "@") {
-		writeErr(w, http.StatusBadRequest, "invalid email")
-		return
-	}
-	if len(in.Email) > 254 {
+	if !storage.ValidEmail(in.Email) {
 		writeErr(w, http.StatusBadRequest, "invalid email")
 		return
 	}
@@ -115,7 +134,10 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 	// With sign-up closed only the very first account may be created; the
 	// store checks that again under a lock, so two people racing on a fresh
 	// install cannot both get in.
-	u, err := a.deps.Store.CreateUser(r.Context(), in.Email, in.DisplayName, string(hash), closed)
+	u, err := a.deps.Store.CreateUser(r.Context(), storage.NewUser{
+		Email: in.Email, DisplayName: in.DisplayName, PasswordHash: string(hash),
+		OnlyIfEmpty: closed, Verified: inv != nil,
+	})
 	if errors.Is(err, storage.ErrForbidden) {
 		writeErr(w, http.StatusForbidden, "sign-up is closed on this instance: ask for an invitation")
 		return
@@ -128,7 +150,12 @@ func (a *api) register(w http.ResponseWriter, r *http.Request) {
 		writeStoreErr(w, err)
 		return
 	}
-	_ = a.deps.Store.AcceptPendingInvites(r.Context(), u.ID, u.Email)
+	if err := a.deps.Store.AcceptPendingInvites(r.Context(), u); err != nil {
+		a.deps.Logger.Warn("accept invites", "err", err)
+	}
+	if u.EmailVerifiedAt == nil {
+		a.sendVerification(u)
+	}
 	a.issueSession(w, u, http.StatusCreated)
 }
 
@@ -141,7 +168,11 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 	email := strings.ToLower(strings.TrimSpace(in.Email))
 	// Failures are counted per account, not per address: the address comes
 	// from proxy headers anyone can forge, the account under attack does not.
-	if !loginLimiter.allow(email) {
+	ip := clientip.From(r)
+	// Per account against guessing one password, per address against
+	// spraying many accounts from one machine. The address is trustworthy
+	// because only our own proxies' forwarding headers are believed.
+	if !loginLimiter.allow(email) || !ipLoginLimiter.allow(ip) {
 		writeErr(w, http.StatusTooManyRequests, "too many failed attempts: try again in a few minutes")
 		return
 	}
@@ -158,13 +189,16 @@ func (a *api) login(w http.ResponseWriter, r *http.Request) {
 			a.deps.Logger.Error("login lookup", "err", err)
 		}
 		loginLimiter.fail(email)
+		ipLoginLimiter.fail(ip)
 		// One message for both "unknown email" and "wrong password": telling
 		// them apart would let anyone find out who has an account.
 		writeErr(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
 	loginLimiter.reset(email)
-	_ = a.deps.Store.AcceptPendingInvites(r.Context(), u.ID, u.Email)
+	if err := a.deps.Store.AcceptPendingInvites(r.Context(), u); err != nil {
+		a.deps.Logger.Warn("accept invites", "err", err)
+	}
 	a.issueSession(w, u, http.StatusOK)
 }
 
@@ -187,6 +221,8 @@ func (a *api) me(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"user":   publicUser(id.User),
 		"spaces": mapSlice(spaces, publicSpace),
+		// Whether what is shared with this address is visible yet.
+		"email_trusted": a.deps.Store.AccessEmail(id.User) != "",
 	})
 }
 
@@ -231,7 +267,7 @@ func (a *api) listSpaceArtifacts(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := identityFrom(r)
-	items, err := a.deps.Store.ListBySpace(r.Context(), sp.ID, id.User.ID, id.User.Email)
+	items, err := a.deps.Store.ListBySpace(r.Context(), sp.ID, id.User.ID, a.deps.Store.AccessEmail(id.User))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -244,7 +280,7 @@ func (a *api) listSpaceArtifacts(w http.ResponseWriter, r *http.Request) {
 // access resolves artifact and role in one go.
 func (a *api) access(r *http.Request, artifactID uuid.UUID) (*storage.Artifact, storage.Role, error) {
 	id := identityFrom(r)
-	role, err := a.deps.Store.ResolveAccess(r.Context(), artifactID, userIDOf(id), emailOf(id))
+	role, err := a.deps.Store.ResolveAccess(r.Context(), artifactID, userIDOf(id), a.accessEmail(id))
 	if err != nil {
 		return nil, storage.RoleNone, err
 	}
@@ -322,7 +358,7 @@ func (a *api) listFeed(w http.ResponseWriter, r *http.Request) {
 		}
 		opt.SpaceID = &sp.ID
 	}
-	items, err := a.deps.Store.ListVisibleTo(r.Context(), id.User.ID, id.User.Email, opt)
+	items, err := a.deps.Store.ListVisibleTo(r.Context(), id.User.ID, a.deps.Store.AccessEmail(id.User), opt)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -341,7 +377,7 @@ func (a *api) myArtifacts(w http.ResponseWriter, r *http.Request) {
 
 func (a *api) sharedWithMe(w http.ResponseWriter, r *http.Request) {
 	id := identityFrom(r)
-	items, err := a.deps.Store.ListSharedWithMe(r.Context(), id.User.ID, id.User.Email)
+	items, err := a.deps.Store.ListSharedWithMe(r.Context(), id.User.ID, a.deps.Store.AccessEmail(id.User))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -428,7 +464,7 @@ func (a *api) listVersions(w http.ResponseWriter, r *http.Request, art *storage.
 // process that touches hostile bytes does not need to know who the users are.
 func (a *api) contentURL(w http.ResponseWriter, r *http.Request, art *storage.Artifact, role storage.Role) {
 	n, _ := strconv.Atoi(r.URL.Query().Get("v"))
-	out, err := a.signContent(r, art, n, identityFrom(r).User.ID)
+	out, err := a.signContent(r, art, n, identityFrom(r).User.ID, "")
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -436,7 +472,9 @@ func (a *api) contentURL(w http.ResponseWriter, r *http.Request, art *storage.Ar
 	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *api) signContent(r *http.Request, art *storage.Artifact, n int, userID uuid.UUID) (map[string]any, error) {
+// signContent mints a content grant. linkTag is set for anonymous visitors of
+// a shared link (see storage.LinkTag).
+func (a *api) signContent(r *http.Request, art *storage.Artifact, n int, userID uuid.UUID, linkTag string) (map[string]any, error) {
 	v, err := a.deps.Store.GetVersion(r.Context(), art.ID, n)
 	if err != nil {
 		return nil, err
@@ -446,6 +484,7 @@ func (a *api) signContent(r *http.Request, art *storage.Artifact, n int, userID 
 		Version:    v.VersionNumber,
 		UserID:     userID,
 		ExpiresAt:  time.Now().Add(a.deps.ContentGrantTTL).Unix(),
+		LinkTag:    linkTag,
 	})
 	if err != nil {
 		return nil, err
@@ -484,11 +523,15 @@ func (a *api) openLink(w http.ResponseWriter, r *http.Request) {
 		if err := a.deps.Store.RecordLinkVisit(r.Context(), art.ID, uid); err != nil {
 			a.deps.Logger.Warn("link visit", "err", err)
 		}
-		if role, err := a.deps.Store.ResolveAccess(r.Context(), art.ID, uid, emailOf(id)); err == nil {
+		if role, err := a.deps.Store.ResolveAccess(r.Context(), art.ID, uid, a.accessEmail(id)); err == nil {
 			resp["my_role"] = string(role)
 		}
 	}
-	c, err := a.signContent(r, art, n, uid)
+	tag := ""
+	if uid == uuid.Nil && art.LinkToken != nil {
+		tag = storage.LinkTag(*art.LinkToken)
+	}
+	c, err := a.signContent(r, art, n, uid, tag)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
@@ -675,7 +718,7 @@ func (a *api) moveArtifact(w http.ResponseWriter, r *http.Request, art *storage.
 
 func (a *api) listForks(w http.ResponseWriter, r *http.Request, art *storage.Artifact, _ storage.Role) {
 	id := identityFrom(r)
-	items, err := a.deps.Store.ForkChildren(r.Context(), art.ID, id.User.ID, id.User.Email)
+	items, err := a.deps.Store.ForkChildren(r.Context(), art.ID, id.User.ID, a.deps.Store.AccessEmail(id.User))
 	if err != nil {
 		writeStoreErr(w, err)
 		return

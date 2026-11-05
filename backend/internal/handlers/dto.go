@@ -53,12 +53,14 @@ type userJSON struct {
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
 	IsAdmin     bool      `json:"is_admin"`
-	CreatedAt   time.Time `json:"created_at"`
+	// EmailVerified says whether the person proved they own Email.
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func publicUser(u *storage.User) userJSON {
 	return userJSON{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName,
-		IsAdmin: u.IsAdmin, CreatedAt: u.CreatedAt}
+		IsAdmin: u.IsAdmin, EmailVerified: u.EmailVerifiedAt != nil, CreatedAt: u.CreatedAt}
 }
 
 type spaceJSON struct {

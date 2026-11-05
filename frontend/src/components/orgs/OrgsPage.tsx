@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
+import { CopyBlock } from '../ui/CopyBlock'
 import { api, type Artifact, type Member, type Org } from '../../lib/api'
 import { useSession } from '../../lib/session'
 import { ArtifactCard } from '../dashboard/ArtifactCard'
@@ -89,6 +90,7 @@ export function OrgDetail() {
   const [email, setEmail] = useState('')
   const [role, setRole] = useState('member')
   const [note, setNote] = useState('')
+  const [inviteURL, setInviteURL] = useState('')
   const [err, setErr] = useState('')
 
   const reload = () => {
@@ -101,11 +103,15 @@ export function OrgDetail() {
     e.preventDefault()
     setErr('')
     setNote('')
+    setInviteURL('')
     try {
       const r = await api.inviteToOrg(id, email.trim(), role)
       setNote(r.result === 'member'
         ? 'Added: they already had an account.'
-        : 'Invitation saved: they join the first time they sign in.')
+        : r.emailed
+          ? 'Invitation sent by email: they join when they sign up from the link.'
+          : 'Invitation created. This instance cannot send email: send them this link yourself.')
+      setInviteURL(r.invite_url ?? '')
       setEmail('')
       reload()
     } catch (e: any) {
@@ -130,6 +136,11 @@ export function OrgDetail() {
           <button className="btn-primary shrink-0">Invite</button>
         </form>
         {note && <p className="mb-3 text-sm text-emerald-400">{note}</p>}
+        {inviteURL && (
+          <div className="mb-3">
+            <CopyBlock text={inviteURL} label="Invitation link · works once, for 14 days" wrap />
+          </div>
+        )}
         {err && <p className="mb-3 text-sm text-red-400">{err}</p>}
 
         <ul className="divide-y divide-ink-800 rounded-xl border border-ink-800">

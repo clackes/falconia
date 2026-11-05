@@ -73,7 +73,7 @@ export function ref(spaceOrId: string, slug?: string): string {
 
 export type User = {
   id: string; email: string; display_name: string
-  is_admin: boolean; created_at: string
+  is_admin: boolean; email_verified: boolean; created_at: string
 }
 
 export type Space = {
@@ -188,6 +188,10 @@ export type InstanceConfig = {
   mcp_url: string
   allow_registration: boolean
   max_upload_bytes: number; max_bundle_files: number
+  /** An unverified address does not unlock what is shared with it. */
+  email_verification_required: boolean
+  /** The instance has a mail server: verification and invitation emails work. */
+  can_send_email: boolean
 }
 
 export type ContentGrant = { url: string; version: number; entry_path: string; expires_in: number }
@@ -198,11 +202,16 @@ export const api = {
   config: () => GET<InstanceConfig>('/api/config'),
   categories: () => GET<{ categories: { slug: string; label: string; icon: string }[] }>('/api/categories'),
 
-  register: (email: string, password: string, display_name: string) =>
-    POST<{ token: string; user: User }>('/api/auth/register', { email, password, display_name }),
+  register: (email: string, password: string, display_name: string, invite_token?: string) =>
+    POST<{ token: string; user: User }>('/api/auth/register', { email, password, display_name, invite_token }),
+  verifyEmail: (token: string) => POST<{ ok: boolean; email: string }>('/api/auth/verify', { token }),
+  resendVerification: () => POST<{ ok: boolean; already_verified?: boolean }>('/api/auth/verify/resend', {}),
+  describeInvite: (token: string) =>
+    GET<{ email: string; team: string; role: string }>(`/api/auth/invite/${encodeURIComponent(token)}`),
+  logoutEverywhere: () => POST<void>('/api/auth/logout-all', {}),
   login: (email: string, password: string) =>
     POST<{ token: string; user: User }>('/api/auth/login', { email, password }),
-  me: () => GET<{ user: User; spaces: Space[] }>('/api/auth/me'),
+  me: () => GET<{ user: User; spaces: Space[]; email_trusted: boolean }>('/api/auth/me'),
 
   spaces: () => GET<{ spaces: Space[] }>('/api/spaces'),
 
@@ -301,7 +310,7 @@ export const api = {
   createOrg: (name: string, slug?: string) => POST<{ org: Org }>('/api/orgs', { name, slug }),
   orgMembers: (id: string) => GET<{ members: Member[] }>(`/api/orgs/${id}/members`),
   inviteToOrg: (id: string, email: string, role: string) =>
-    POST<{ result: string }>(`/api/orgs/${id}/members`, { email, role }),
+    POST<{ result: string; emailed?: boolean; invite_url?: string }>(`/api/orgs/${id}/members`, { email, role }),
   removeOrgMember: (id: string, uid: string) => DELETE<void>(`/api/orgs/${id}/members/${uid}`),
   orgArtifacts: (id: string) => GET<{ artifacts: Artifact[] }>(`/api/orgs/${id}/artifacts`),
 
@@ -310,6 +319,7 @@ export const api = {
   adminEvents: () => GET<{ events: Event[] }>('/api/admin/events'),
   adminSetRole: (id: string, is_admin: boolean) =>
     POST<void>(`/api/admin/users/${id}/role`, { is_admin }),
+  adminVerifyUser: (id: string) => POST<void>(`/api/admin/users/${id}/verify`, {}),
   agentStatus: () => GET<AgentStatus>('/api/agent/status'),
   agentRun: (prompt: string) => POST<{ id: string }>('/api/agent/runs', { prompt }),
 

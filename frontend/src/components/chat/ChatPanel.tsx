@@ -14,7 +14,7 @@ type Chat = ReturnType<typeof useChat>
  * The conversation column.
  *
  * It draws what the hook produces and nothing else: the logic lives in
- * useChat, so the same chat can sit next to the editor without being
+ * useChat, so the same chat can sit next to the preview without being
  * rewritten.
  */
 export function ChatPanel({ chat, hint, suggestions = [] }: {
@@ -26,7 +26,7 @@ export function ChatPanel({ chat, hint, suggestions = [] }: {
   const nav = useNavigate()
   const [input, setInput] = useState('')
   const [settings, setSettings] = useState(false)
-  const bottomRef = useRef<HTMLDivElement | null>(null)
+  const listRef = useRef<HTMLDivElement | null>(null)
   const boxRef = useRef<HTMLTextAreaElement | null>(null)
 
   // The box grows with the text up to a cap: a single line means typing
@@ -39,7 +39,11 @@ export function ChatPanel({ chat, hint, suggestions = [] }: {
   }, [input])
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    // Scroll the conversation itself, not with scrollIntoView: that scrolls
+    // every scrollable ancestor too, and on a phone it pushed the Studio's
+    // header (and its Publish button) out of sight.
+    const el = listRef.current
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: 'smooth' })
   }, [chat.msgs, chat.tools])
 
   const submit = (e: React.FormEvent | React.KeyboardEvent) => {
@@ -77,7 +81,7 @@ export function ChatPanel({ chat, hint, suggestions = [] }: {
         </div>
       </header>
 
-      <div className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto p-3">
         {/* Disconnected: the panel explains how to connect and the chat stays
             locked. Connected: a confirmation line stays while the
             conversation is empty, then disappears to save space. */}
@@ -141,7 +145,6 @@ export function ChatPanel({ chat, hint, suggestions = [] }: {
         )}
 
         {chat.err && <p className="text-sm text-red-400">{chat.err}</p>}
-        <div ref={bottomRef} />
       </div>
 
       <form onSubmit={submit} className="shrink-0 border-t border-ink-800 p-2.5">
@@ -200,9 +203,9 @@ export function ChatPanel({ chat, hint, suggestions = [] }: {
 /**
  * Assistant shows the answer without the document inside.
  *
- * The code is already in the editor, two columns away: repeating it in full
- * in the bubble pushes off screen the sentence explaining what was done, which
- * is the only part worth reading here.
+ * The document is already running in the preview next to the conversation:
+ * repeating its source in the bubble pushes off screen the sentence explaining
+ * what was done, which is the only part worth reading here.
  */
 function Assistant({ text, pending }: { text: string; pending: boolean }) {
   if (!text) return <>{pending ? '…' : ''}</>
@@ -216,13 +219,12 @@ function Assistant({ text, pending }: { text: string; pending: boolean }) {
   while ((m = fence.exec(text)) !== null) {
     const before = text.slice(last, m.index).trim()
     if (before) parts.push(<span key={`t${n}`}>{before}</span>)
-    const lines = m[1].trim().split('\n').length
     // A fence still open means the document is still arriving.
     const closed = m[0].endsWith('```')
     parts.push(
       <span key={`c${n}`} className="my-1.5 flex items-center gap-2 rounded-lg bg-ink-800 px-2.5 py-1.5 text-xs text-ink-300">
         <span aria-hidden>📄</span>
-        {closed ? `${lines}-line document → in the editor` : 'writing the document…'}
+        {closed ? 'Preview updated' : 'Writing the page…'}
       </span>,
     )
     last = m.index + m[0].length

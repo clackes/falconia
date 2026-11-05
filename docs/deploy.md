@@ -59,6 +59,36 @@ ALLOW_REGISTRATION=false
 created while the instance is empty: without that exception there would be no
 way to get a first administrator.
 
+### Email and invitations
+
+Sharing and team invitations work by email address, so an address has to be
+proven before it unlocks anything — otherwise anyone could sign up as a
+colleague and inherit what was meant for them.
+
+- **With a mail server** (`SMTP_HOST`, `SMTP_FROM`, and usually
+  `SMTP_USERNAME`/`SMTP_PASSWORD`): new accounts get a confirmation link and
+  see what is shared with their address once they click it. Team invitations
+  and shares are emailed. `SMTP_SECURITY=starttls` (port 587) is the default;
+  use `tls` for port 465. Credentials are never sent over an unencrypted
+  connection.
+- **Without one**: verification is off (the backend logs a warning if sign-up
+  is also open). Inviting someone to a team returns a link for you to pass on;
+  signing up through it proves the address and works even with
+  `ALLOW_REGISTRATION=false`. An administrator can also mark an address as
+  verified from the Instance page. Set `EMAIL_VERIFICATION=required` to keep
+  shares locked until one of these happens.
+
+Accounts that existed before this feature are considered verified.
+
+### Client addresses
+
+Login rate limits and visitor counts use the client's address. It is read from
+`X-Forwarded-For` only when the request comes from a network listed in
+`TRUSTED_PROXIES` (by default loopback and private ranges, where the bundled
+nginx and most reverse proxies sit), walking the list from the right, so a
+client cannot choose its own address. If clients can reach the backend directly
+on a private network, list only your proxies' addresses.
+
 Create the proxy network if it does not exist, then start:
 
 ```bash

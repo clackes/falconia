@@ -198,7 +198,7 @@ export function useChat(opts: ChatOptions = {}) {
  * extractDocument looks for a complete HTML document in the answer.
  *
  * It takes the LAST one: when the model first shows a fragment and then the
- * whole file, the second is the one wanted in the editor.
+ * whole file, the second is the one to show.
  */
 export function extractDocument(text: string): string | null {
   const fenced = [...text.matchAll(/```(?:html|HTML)?\s*\n([\s\S]*?)```/g)]

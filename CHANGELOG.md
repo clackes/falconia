@@ -26,6 +26,28 @@ open-source, self-hosted home for artifacts made by any AI agent.
   policy, CI, release workflow publishing images to GHCR, unit and end-to-end
   tests.
 
+### Changed (Studio)
+- Creating and editing an artifact is now a conversation and a live preview:
+  the code editor is gone. Every answer from the agent can be undone and
+  redone from the preview; on a phone a switch moves between chat and
+  preview. Hand-editing the source stays possible with `falconia pull` and any
+  editor. The Monaco dependency is removed from the frontend.
+
+### Security
+- Email addresses must be proven before they unlock shares or team
+  invitations (confirmation link by email, invitation link, or an
+  administrator). New `SMTP_*`, `EMAIL_VERIFICATION` settings.
+- Team invitations travel as single-use links (14 days) and let invited people
+  sign up on instances with sign-up closed.
+- "Sign out everywhere" revokes every session of an account.
+- The CLI login key is minted when the CLI collects it, never stored in clear.
+- Content grants are re-checked (30-second cache): revoking a share, making
+  an artifact private or rotating its link takes effect within seconds instead
+  of when the two-hour grant expires.
+- Client addresses come from `X-Forwarded-For` only through trusted proxies
+  (`TRUSTED_PROXIES`); login is also limited per address.
+- CLI login codes are drawn without modulo bias.
+
 ### Fixed
 - Two sign-ups on an empty instance could both become administrator; with
   sign-up closed, several "first" accounts could slip in.

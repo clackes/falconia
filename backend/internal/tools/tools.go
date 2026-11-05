@@ -309,7 +309,7 @@ func (r *Runner) Call(ctx context.Context, name string, raw json.RawMessage) (st
 			}
 			opt.SpaceID = &sp.ID
 		}
-		items, err := r.Store.ListVisibleTo(ctx, r.User.ID, r.User.Email, opt)
+		items, err := r.Store.ListVisibleTo(ctx, r.User.ID, r.Store.AccessEmail(r.User), opt)
 		if err != nil {
 			return "", err
 		}
@@ -623,7 +623,7 @@ func (r *Runner) Call(ctx context.Context, name string, raw json.RawMessage) (st
 		}
 		// Permission is checked on the artifact, never on the thread: a
 		// guessed id must not open a closed door.
-		role, err := r.Store.ResolveAccess(ctx, t.ArtifactID, r.User.ID, r.User.Email)
+		role, err := r.Store.ResolveAccess(ctx, t.ArtifactID, r.User.ID, r.Store.AccessEmail(r.User))
 		if err != nil || !role.CanRead() {
 			return "", errors.New("thread not found")
 		}
@@ -698,7 +698,7 @@ func (r *Runner) resolve(ctx context.Context, ref string) (*storage.Artifact, st
 	if err != nil {
 		return nil, storage.RoleNone, errors.New("artifact not found")
 	}
-	role, err := r.Store.ResolveAccess(ctx, art.ID, r.User.ID, r.User.Email)
+	role, err := r.Store.ResolveAccess(ctx, art.ID, r.User.ID, r.Store.AccessEmail(r.User))
 	if err != nil || !role.CanRead() {
 		return nil, storage.RoleNone, errors.New("artifact not found")
 	}

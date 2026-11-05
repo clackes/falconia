@@ -24,9 +24,11 @@ import (
 
 	"github.com/clackes/falconia/backend/internal/agentbridge"
 	"github.com/clackes/falconia/backend/internal/blob"
+	"github.com/clackes/falconia/backend/internal/clientip"
 	"github.com/clackes/falconia/backend/internal/config"
 	"github.com/clackes/falconia/backend/internal/content"
 	"github.com/clackes/falconia/backend/internal/handlers"
+	"github.com/clackes/falconia/backend/internal/mail"
 	"github.com/clackes/falconia/backend/internal/storage"
 )
 
@@ -59,6 +61,17 @@ func main() {
 	}
 	go janitor(ctx, store, logger)
 
+	// Without verification, an unverified address is trusted like a verified
+	// one: the instance has no way to verify, and email sharing must work.
+	store.TrustUnverifiedEmail = !cfg.RequireEmailVerification
+	mailer := mail.New(cfg.SMTP)
+	if !cfg.RequireEmailVerification && cfg.AllowRegistration {
+		logger.Warn("email verification is off while sign-up is open: anyone can register " +
+			"someone else's address and see what is shared with it; configure SMTP_* or set " +
+			"EMAIL_VERIFICATION=required")
+	}
+	ips := &clientip.Resolver{Trusted: cfg.TrustedProxies}
+
 	blobs, err := openBlobStore(ctx, cfg)
 	if err != nil {
 		logger.Error("object storage", "err", err)
@@ -81,7 +94,12 @@ func main() {
 			BlobBackend:       cfg.BlobBackend,
 			MaxUploadBytes:    cfg.MaxUploadBytes,
 			MaxBundleFiles:    cfg.MaxBundleFiles,
-			Logger:            logger,
+
+			Mailer:                   mailer,
+			RequireEmailVerification: cfg.RequireEmailVerification,
+			ClientIP:                 ips,
+
+			Logger: logger,
 		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    64 << 10,
@@ -97,6 +115,7 @@ func main() {
 			Blobs:     blobs,
 			Secret:    cfg.ContentSecret,
 			AppOrigin: cfg.AppBaseURL,
+			ClientIP:  ips,
 			Logger:    logger,
 		}).Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
@@ -110,7 +129,8 @@ func main() {
 	logger.Info("falconia listening", "version", handlers.Version,
 		"app", cfg.ListenAddr, "content", cfg.ContentListenAddr,
 		"app_url", cfg.AppBaseURL, "content_url", cfg.ContentBaseURL,
-		"blobs", cfg.BlobBackend)
+		"blobs", cfg.BlobBackend, "smtp", mail.Describe(cfg.SMTP),
+		"email_verification", cfg.RequireEmailVerification)
 
 	<-ctx.Done()
 	logger.Info("shutting down")
@@ -133,7 +153,8 @@ func main() {
 	logger.Info("stopped")
 }
 
-// janitor deletes expired CLI login codes, at startup and then every hour.
+// janitor deletes expired CLI login codes and email links, at startup and
+// then every hour.
 // Running it only at startup let the table grow for as long as the process
 // lived, one row per abandoned `falconia login`.
 func janitor(ctx context.Context, store *storage.Postgres, logger *slog.Logger) {
@@ -142,6 +163,9 @@ func janitor(ctx context.Context, store *storage.Postgres, logger *slog.Logger) 
 	for {
 		if err := store.PurgeExpiredDeviceCodes(ctx); err != nil && ctx.Err() == nil {
 			logger.Warn("device code cleanup", "err", err)
+		}
+		if err := store.PurgeExpiredTokens(ctx); err != nil && ctx.Err() == nil {
+			logger.Warn("token cleanup", "err", err)
 		}
 		select {
 		case <-ctx.Done():

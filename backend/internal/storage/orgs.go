@@ -28,7 +28,7 @@ type Share struct {
 
 func (p *Postgres) AddShare(ctx context.Context, artifactID, invitedBy uuid.UUID, email, role string) error {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if !validEmail(email) {
+	if !ValidEmail(email) {
 		return invalid("invalid email")
 	}
 	if role != "editor" {
@@ -252,18 +252,22 @@ func (p *Postgres) ListOrgMembers(ctx context.Context, orgID uuid.UUID) ([]Membe
 // through the database.
 var ErrLastOwner = errors.New("last owner")
 
+// InviteTTL is how long an invitation link works.
+const InviteTTL = 14 * 24 * time.Hour
+
 // InviteToOrg adds people who already have an account right away and parks
 // the others as pending invites. It returns "member" or "invite" so the
-// interface can say the right thing.
+// interface can say the right thing, and for an invite the token of a fresh
+// invitation link (inviting again replaces the previous link).
 //
 // byRole is the inviter's own role, and it bounds what they can hand out:
 // only an owner can make someone an owner or change an owner's role. Without
 // that rule an admin could promote themselves, or quietly demote every owner
 // by "re-inviting" them as members.
-func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, byRole, email, role string) (string, error) {
+func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, byRole, email, role string) (string, string, error) {
 	email = strings.ToLower(strings.TrimSpace(email))
-	if !validEmail(email) {
-		return "", invalid("invalid email")
+	if !ValidEmail(email) {
+		return "", "", invalid("invalid email")
 	}
 	switch role {
 	case "owner", "admin", "member":
@@ -271,44 +275,52 @@ func (p *Postgres) InviteToOrg(ctx context.Context, orgID, byUser uuid.UUID, byR
 		role = "member"
 	}
 	if role == "owner" && byRole != "owner" {
-		return "", ErrForbidden
+		return "", "", ErrForbidden
 	}
 
 	u, err := p.GetUserByEmail(ctx, email)
 	if err != nil && !errors.Is(err, ErrNotFound) {
-		return "", err
+		return "", "", err
 	}
 	if err == nil {
 		tx, err := p.pool.Begin(ctx)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		defer tx.Rollback(ctx)
 		owners, current, err := lockOwners(ctx, tx, orgID, u.ID)
 		if err != nil {
-			return "", err
+			return "", "", err
 		}
 		if current == "owner" && role != "owner" {
 			if byRole != "owner" {
-				return "", ErrForbidden
+				return "", "", ErrForbidden
 			}
 			if owners <= 1 {
-				return "", ErrLastOwner
+				return "", "", ErrLastOwner
 			}
 		}
 		if _, err := tx.Exec(ctx, `
 			INSERT INTO org_members (org_id, user_id, role) VALUES ($1,$2,$3)
 			ON CONFLICT (org_id, user_id) DO UPDATE SET role = EXCLUDED.role`,
 			orgID, u.ID, role); err != nil {
-			return "", err
+			return "", "", err
 		}
-		return "member", tx.Commit(ctx)
+		return "member", "", tx.Commit(ctx)
+	}
+	token, hash, err := newSecretToken()
+	if err != nil {
+		return "", "", err
 	}
 	_, err = p.pool.Exec(ctx, `
-		INSERT INTO org_invites (org_id, email, role, invited_by) VALUES ($1,$2,$3,$4)
-		ON CONFLICT (org_id, email) DO UPDATE SET role = EXCLUDED.role`,
-		orgID, email, role, byUser)
-	return "invite", err
+		INSERT INTO org_invites (org_id, email, role, invited_by, token_hash, expires_at) VALUES ($1,$2,$3,$4,$5,$6)
+		ON CONFLICT (org_id, email) DO UPDATE
+		  SET role = EXCLUDED.role, token_hash = EXCLUDED.token_hash, expires_at = EXCLUDED.expires_at`,
+		orgID, email, role, byUser, hash, time.Now().Add(InviteTTL))
+	if err != nil {
+		return "", "", err
+	}
+	return "invite", token, nil
 }
 
 // lockOwners locks the team's membership rows that matter for "is this the
@@ -370,9 +382,9 @@ func (p *Postgres) RemoveOrgMember(ctx context.Context, orgID uuid.UUID, byRole 
 	return tx.Commit(ctx)
 }
 
-// validEmail is a sanity check, not RFC 5322: one @ with something on both
+// ValidEmail is a sanity check, not RFC 5322: one @ with something on both
 // sides and a sane length. Delivery is what really validates an address.
-func validEmail(email string) bool {
+func ValidEmail(email string) bool {
 	if len(email) > 254 || strings.ContainsAny(email, " \t\r\n") {
 		return false
 	}
@@ -382,9 +394,10 @@ func validEmail(email string) bool {
 
 // AcceptPendingInvites turns invitations addressed to the email of whoever
 // just signed in into memberships. It runs on every login, not only at
-// sign-up: an invitation can arrive later.
-func (p *Postgres) AcceptPendingInvites(ctx context.Context, userID uuid.UUID, email string) error {
-	email = strings.ToLower(strings.TrimSpace(email))
+// sign-up: an invitation can arrive later. It does nothing until the address
+// is trusted (see AccessEmail): an invitation is a grant like any other.
+func (p *Postgres) AcceptPendingInvites(ctx context.Context, u *User) error {
+	email := p.AccessEmail(u)
 	if email == "" {
 		return nil
 	}
@@ -392,6 +405,6 @@ func (p *Postgres) AcceptPendingInvites(ctx context.Context, userID uuid.UUID, e
 		WITH mine AS (DELETE FROM org_invites WHERE email = $2 RETURNING org_id, role)
 		INSERT INTO org_members (org_id, user_id, role)
 		SELECT org_id, $1, role FROM mine
-		ON CONFLICT (org_id, user_id) DO NOTHING`, userID, email)
+		ON CONFLICT (org_id, user_id) DO NOTHING`, u.ID, email)
 	return err
 }

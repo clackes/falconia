@@ -14,9 +14,6 @@ cli/falconia
 cli/sfa
 frontend/tsconfig.tsbuildinfo
 
-# Monaco is copied here by `npm run monaco`, not versioned
-frontend/public/monaco/
-frontend/public/monaco-vs/
 
 # Test leftovers
 __pycache__/

@@ -42,7 +42,15 @@ func IsInvalid(err error) (string, bool) {
 	return "", false
 }
 
-type Postgres struct{ pool *pgxpool.Pool }
+type Postgres struct {
+	pool *pgxpool.Pool
+
+	// TrustUnverifiedEmail lets an unverified address unlock what was shared
+	// with it. It is set when the instance cannot verify addresses at all (no
+	// mail server and verification not required): refusing every email-based
+	// grant there would make sharing by email useless.
+	TrustUnverifiedEmail bool
+}
 
 func NewPostgres(ctx context.Context, dsn string) (*Postgres, error) {
 	cfg, err := pgxpool.ParseConfig(dsn)
@@ -81,13 +89,19 @@ type User struct {
 	PasswordHash string
 	IsAdmin      bool
 	CreatedAt    time.Time
+	// EmailVerifiedAt is set once the person proved they own Email.
+	EmailVerifiedAt *time.Time
+	// TokensValidAfter rejects every session token issued before it.
+	TokensValidAfter *time.Time
 }
 
-const selectUserCols = `id, email, display_name, COALESCE(password_hash,''), is_admin, created_at`
+const selectUserCols = `id, email, display_name, COALESCE(password_hash,''), is_admin, created_at,
+	email_verified_at, tokens_valid_after`
 
 func scanUser(row pgx.Row) (*User, error) {
 	u := &User{}
-	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt)
+	err := row.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt,
+		&u.EmailVerifiedAt, &u.TokensValidAfter)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -98,6 +112,17 @@ func scanUser(row pgx.Row) (*User, error) {
 // advisory lock in the code uses it.
 const signupLockID = 0x53464101
 
+// NewUser describes an account to create.
+type NewUser struct {
+	Email, DisplayName, PasswordHash string
+	// OnlyIfEmpty is for instances with sign-up closed: the first account may
+	// still be created, and the lock guarantees it is the only one.
+	OnlyIfEmpty bool
+	// Verified marks the email as proven at creation, for sign-ups that came
+	// through an invitation link.
+	Verified bool
+}
+
 // CreateUser registers a person and sets up their personal space right away.
 //
 // The first user of the instance becomes its administrator: that is whoever
@@ -105,12 +130,9 @@ const signupLockID = 0x53464101
 // one. A transaction alone does not make that safe: under READ COMMITTED two
 // simultaneous sign-ups on an empty instance would both see no users and both
 // become admin. The transaction-scoped advisory lock makes the check and the
-// insert one step.
-//
-// onlyIfEmpty is for instances with sign-up closed: the first account may
-// still be created, and the lock guarantees it is the only one, instead of
-// leaving a window in which several "first" accounts slip in.
-func (p *Postgres) CreateUser(ctx context.Context, email, displayName, passwordHash string, onlyIfEmpty bool) (*User, error) {
+// insert one step. The first user's email counts as verified too: there is
+// nobody else yet to prove anything to, and no mail server may exist.
+func (p *Postgres) CreateUser(ctx context.Context, in NewUser) (*User, error) {
 	tx, err := p.pool.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -124,17 +146,21 @@ func (p *Postgres) CreateUser(ctx context.Context, email, displayName, passwordH
 	if err := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM users)`).Scan(&anyUser); err != nil {
 		return nil, err
 	}
-	if anyUser && onlyIfEmpty {
+	if anyUser && in.OnlyIfEmpty {
 		return nil, ErrForbidden
 	}
+	now := time.Now()
 	u := &User{
-		ID: uuid.New(), Email: email, DisplayName: displayName,
-		PasswordHash: passwordHash, IsAdmin: !anyUser, CreatedAt: time.Now(),
+		ID: uuid.New(), Email: in.Email, DisplayName: in.DisplayName,
+		PasswordHash: in.PasswordHash, IsAdmin: !anyUser, CreatedAt: now,
+	}
+	if in.Verified || !anyUser {
+		u.EmailVerifiedAt = &now
 	}
 	if _, err := tx.Exec(ctx,
-		`INSERT INTO users (id, email, display_name, password_hash, is_admin, created_at)
-		 VALUES ($1,$2,$3,$4,$5,$6)`,
-		u.ID, u.Email, u.DisplayName, u.PasswordHash, u.IsAdmin, u.CreatedAt); err != nil {
+		`INSERT INTO users (id, email, display_name, password_hash, is_admin, created_at, email_verified_at)
+		 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+		u.ID, u.Email, u.DisplayName, u.PasswordHash, u.IsAdmin, u.CreatedAt, u.EmailVerifiedAt); err != nil {
 		if isUniqueViolation(err) {
 			return nil, ErrConflict
 		}
@@ -147,6 +173,26 @@ func (p *Postgres) CreateUser(ctx context.Context, email, displayName, passwordH
 		return nil, err
 	}
 	return u, nil
+}
+
+// AccessEmail is the address that may unlock email-based grants for u: the
+// email itself once verified (or when the instance trusts unverified ones),
+// "" otherwise. Every access check that takes an email must be given this,
+// never User.Email directly.
+func (p *Postgres) AccessEmail(u *User) string {
+	if u == nil {
+		return ""
+	}
+	if u.EmailVerifiedAt != nil || p.TrustUnverifiedEmail {
+		return strings.ToLower(u.Email)
+	}
+	return ""
+}
+
+// RevokeSessions invalidates every session token issued so far.
+func (p *Postgres) RevokeSessions(ctx context.Context, userID uuid.UUID) error {
+	_, err := p.pool.Exec(ctx, `UPDATE users SET tokens_valid_after = NOW() WHERE id=$1`, userID)
+	return err
 }
 
 func (p *Postgres) GetUserByEmail(ctx context.Context, email string) (*User, error) {
@@ -170,13 +216,28 @@ func (p *Postgres) ListUsers(ctx context.Context, limit int) ([]User, error) {
 	out := []User{}
 	for rows.Next() {
 		var u User
-		if err := rows.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt); err != nil {
+		if err := rows.Scan(&u.ID, &u.Email, &u.DisplayName, &u.PasswordHash, &u.IsAdmin, &u.CreatedAt,
+			&u.EmailVerifiedAt, &u.TokensValidAfter); err != nil {
 			return nil, err
 		}
 		u.PasswordHash = ""
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// MarkEmailVerified is the administrator vouching for an address, for
+// instances without a mail server.
+func (p *Postgres) MarkEmailVerified(ctx context.Context, id uuid.UUID) error {
+	tag, err := p.pool.Exec(ctx,
+		`UPDATE users SET email_verified_at = COALESCE(email_verified_at, NOW()) WHERE id=$1`, id)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (p *Postgres) SetAdmin(ctx context.Context, id uuid.UUID, admin bool) error {

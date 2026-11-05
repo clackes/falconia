@@ -11,6 +11,8 @@ import (
 	"github.com/clackes/falconia/backend/internal/agentbridge"
 	"github.com/clackes/falconia/backend/internal/blob"
 	"github.com/clackes/falconia/backend/internal/categories"
+	"github.com/clackes/falconia/backend/internal/clientip"
+	"github.com/clackes/falconia/backend/internal/mail"
 	"github.com/clackes/falconia/backend/internal/mcp"
 	"github.com/clackes/falconia/backend/internal/storage"
 )
@@ -33,6 +35,11 @@ type Deps struct {
 	MaxUploadBytes    int64
 	MaxBundleFiles    int
 
+	// Mailer is nil when the instance has no mail server.
+	Mailer                   mail.Sender
+	RequireEmailVerification bool
+	ClientIP                 *clientip.Resolver
+
 	Logger *slog.Logger
 }
 
@@ -50,7 +57,7 @@ type Deps struct {
 func NewRouter(d Deps) http.Handler {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
-	r.Use(middleware.RealIP)
+	r.Use(d.ClientIP.Middleware)
 	r.Use(accessLog(d.Logger))
 	r.Use(middleware.Recoverer)
 	r.Use(securityHeaders())
@@ -74,6 +81,10 @@ func NewRouter(d Deps) http.Handler {
 	r.Post("/api/auth/register", a.register)
 	r.Post("/api/auth/login", a.login)
 	r.Get("/api/auth/me", a.auth(a.me))
+	r.Post("/api/auth/verify", a.verifyEmail)
+	r.Post("/api/auth/verify/resend", a.humanOnly(a.resendVerification))
+	r.Get("/api/auth/invite/{token}", a.describeInvitation)
+	r.Post("/api/auth/logout-all", a.humanOnly(a.logoutEverywhere))
 
 	// CLI login. Start and poll are public by necessity: whoever calls them
 	// has no token yet. Approving needs a real session, because that is where
@@ -152,6 +163,7 @@ func NewRouter(d Deps) http.Handler {
 	r.Get("/api/admin/stats", a.adminOnly(a.adminStats))
 	r.Get("/api/admin/users", a.adminOnly(a.adminUsers))
 	r.Post("/api/admin/users/{id}/role", a.adminOnly(a.adminSetRole))
+	r.Post("/api/admin/users/{id}/verify", a.adminOnly(a.adminVerifyUser))
 	r.Get("/api/admin/events", a.adminOnly(a.adminEvents))
 	r.Post("/api/admin/gc", a.adminOnly(a.adminGC))
 

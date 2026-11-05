@@ -222,7 +222,7 @@ func (a *api) deploy(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Existing artifact: publishing needs edit access.
-	role, err := a.deps.Store.ResolveAccess(r.Context(), art.ID, id.User.ID, id.User.Email)
+	role, err := a.deps.Store.ResolveAccess(r.Context(), art.ID, id.User.ID, a.deps.Store.AccessEmail(id.User))
 	if err != nil {
 		writeStoreErr(w, err)
 		return

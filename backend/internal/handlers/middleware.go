@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net/http"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/clackes/falconia/backend/internal/agents"
+	"github.com/clackes/falconia/backend/internal/clientip"
 	"github.com/clackes/falconia/backend/internal/storage"
 	"github.com/clackes/falconia/backend/pkg/auth"
 )
@@ -188,6 +190,8 @@ func (a *api) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+var errSessionRevoked = errors.New("session revoked")
+
 // identify resolves the bearer token, JWT or API key alike.
 func (a *api) identify(r *http.Request) (*identity, error) {
 	tok := extractBearer(r)
@@ -208,6 +212,13 @@ func (a *api) identify(r *http.Request) (*identity, error) {
 	u, err := a.deps.Store.GetUser(r.Context(), claims.UserID)
 	if err != nil {
 		return nil, err
+	}
+	// "Sign out everywhere" stamps a time; any session issued at or before
+	// it is dead. iat has one-second resolution, so the comparison is on whole
+	// seconds and errs on the side of rejecting.
+	if u.TokensValidAfter != nil && claims.IssuedAt != nil &&
+		!claims.IssuedAt.After(u.TokensValidAfter.Truncate(time.Second)) {
+		return nil, errSessionRevoked
 	}
 	return &identity{User: u}, nil
 }
@@ -245,11 +256,13 @@ func userIDOf(id *identity) uuid.UUID {
 	return id.User.ID
 }
 
-func emailOf(id *identity) string {
+// accessEmail is the address that may unlock email-based grants for the
+// caller: empty for anonymous callers and for unverified addresses.
+func (a *api) accessEmail(id *identity) string {
 	if id == nil || id.User == nil {
 		return ""
 	}
-	return id.User.Email
+	return a.deps.Store.AccessEmail(id.User)
 }
 
 // accessLog writes one structured line per request.
@@ -280,7 +293,7 @@ func accessLog(logger *slog.Logger) func(http.Handler) http.Handler {
 			logger.Log(r.Context(), level, "http",
 				"method", r.Method, "path", p, "status", ww.Status(),
 				"bytes", ww.BytesWritten(), "ms", time.Since(start).Milliseconds(),
-				"req_id", middleware.GetReqID(r.Context()))
+				"ip", clientip.From(r), "req_id", middleware.GetReqID(r.Context()))
 		})
 	}
 }

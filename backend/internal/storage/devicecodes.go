@@ -36,16 +36,28 @@ type DeviceCode struct {
 const userCodeAlphabet = "ABCDEFGHJKMNPQRSTVWXYZ23456789"
 
 func newUserCode() (string, error) {
-	buf := make([]byte, 8)
-	if _, err := rand.Read(buf); err != nil {
-		return "", err
-	}
+	// Rejection sampling: a byte modulo 30 would favor the first 16 letters
+	// (256 is not a multiple of 30). Bytes at or above 240 are thrown away so
+	// every symbol is equally likely.
+	const limit = 256 - 256%len(userCodeAlphabet)
 	out := make([]byte, 0, 9)
-	for i, b := range buf {
-		if i == 4 {
-			out = append(out, '-')
+	buf := make([]byte, 16)
+	for len(out) < 9 {
+		if _, err := rand.Read(buf); err != nil {
+			return "", err
 		}
-		out = append(out, userCodeAlphabet[int(b)%len(userCodeAlphabet)])
+		for _, b := range buf {
+			if len(out) == 9 {
+				break
+			}
+			if int(b) >= limit {
+				continue
+			}
+			if len(out) == 4 {
+				out = append(out, '-')
+			}
+			out = append(out, userCodeAlphabet[int(b)%len(userCodeAlphabet)])
+		}
 	}
 	return string(out), nil
 }
@@ -114,62 +126,54 @@ func (p *Postgres) FindDeviceByUserCode(ctx context.Context, userCode string) (*
 	return d, err
 }
 
-// ApproveDeviceLogin confirms the login and issues the key the CLI will collect.
+// ApproveDeviceLogin records that a person, in their own browser, said yes.
 //
-// The key is created in the same transaction that marks the code approved,
-// with the row locked: two approvals racing on the same code (a double click,
-// two tabs) would otherwise each mint a year-long key, and the one that lost
-// the race would stay valid with nobody holding it.
+// No key is minted here. It is minted when the CLI collects it, by presenting
+// the device code only the CLI knows; that way the clear-text key never sits
+// in the database waiting to be picked up, where a backup or a read replica
+// would carry it too. The conditional update makes a double approval (a
+// double click, two tabs) a no-op instead of a second grant.
 func (p *Postgres) ApproveDeviceLogin(ctx context.Context, userCode string, userID uuid.UUID) error {
 	d, err := p.FindDeviceByUserCode(ctx, userCode)
 	if err != nil {
 		return err
 	}
-	tx, err := p.pool.Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	var approved bool
-	err = tx.QueryRow(ctx,
-		`SELECT approved_by IS NOT NULL FROM device_codes WHERE id=$1 AND expires_at > NOW() FOR UPDATE`,
-		d.ID).Scan(&approved)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return ErrNotFound
-	}
-	if err != nil {
-		return err
-	}
-	if approved {
+	if d.ApprovedBy != nil {
 		return ErrConflict
 	}
-	_, token, err := createAPIKey(ctx, tx, userID, d.Label, "cli", AllScopes, 365*24*time.Hour)
+	tag, err := p.pool.Exec(ctx, `
+		UPDATE device_codes SET approved_by=$2, approved_at=NOW()
+		 WHERE id=$1 AND approved_by IS NULL AND expires_at > NOW()`, d.ID, userID)
 	if err != nil {
 		return err
 	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE device_codes SET approved_by=$2, approved_at=NOW(), issued_token=$3 WHERE id=$1`,
-		d.ID, userID, token); err != nil {
-		return err
+	if tag.RowsAffected() == 0 {
+		return ErrConflict
 	}
-	return tx.Commit(ctx)
+	return nil
 }
 
 // PollDeviceLogin is what the CLI calls in a loop.
 //
-// It returns ("", nil) until someone approves. Once the token exists it is
-// handed over and the row deleted in the same statement: the token is given
-// out exactly once, and whoever intercepted the device code a moment later
-// would find nothing left to collect.
+// It returns ("", nil) until someone approves. Once approved, the row is
+// deleted and the key created in the same transaction: the key is handed out
+// exactly once, and whoever replays the device code a moment later finds
+// nothing left to collect.
 func (p *Postgres) PollDeviceLogin(ctx context.Context, deviceCode string) (string, *User, error) {
-	var token string
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return "", nil, err
+	}
+	defer tx.Rollback(ctx)
+
 	var userID uuid.UUID
-	err := p.pool.QueryRow(ctx, `
+	var label string
+	var legacy *string
+	err = tx.QueryRow(ctx, `
 		DELETE FROM device_codes
-		 WHERE device_code_hash = $1 AND issued_token IS NOT NULL AND expires_at > NOW()
-		 RETURNING issued_token, approved_by`, hashDeviceCode(deviceCode),
-	).Scan(&token, &userID)
+		 WHERE device_code_hash = $1 AND approved_by IS NOT NULL AND expires_at > NOW()
+		 RETURNING approved_by, label, issued_token`, hashDeviceCode(deviceCode),
+	).Scan(&userID, &label, &legacy)
 	if errors.Is(err, pgx.ErrNoRows) {
 		// Either not approved yet, or expired: a second look tells them apart,
 		// so the CLI can say "expired" instead of waiting forever.
@@ -185,6 +189,17 @@ func (p *Postgres) PollDeviceLogin(ctx context.Context, deviceCode string) (stri
 		return "", nil, nil
 	}
 	if err != nil {
+		return "", nil, err
+	}
+	token := ""
+	if legacy != nil && *legacy != "" {
+		// Approved by a backend from before this change: hand over what it
+		// minted rather than leave it orphaned.
+		token = *legacy
+	} else if _, token, err = createAPIKey(ctx, tx, userID, label, "cli", AllScopes, 365*24*time.Hour); err != nil {
+		return "", nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
 		return "", nil, err
 	}
 	u, err := p.GetUser(ctx, userID)

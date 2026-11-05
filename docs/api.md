@@ -52,7 +52,16 @@ convention.
 | --- | --- |
 | `POST /api/auth/register` | `{email, password, display_name}` → `{token, user}` |
 | `POST /api/auth/login` | `{email, password}` → `{token, user}`; `429` after 10 failures on one account in 15 minutes |
-| `GET /api/auth/me` | → `{user, spaces}` |
+| `GET /api/auth/me` | → `{user, spaces, email_trusted}` |
+| `POST /api/auth/verify` | `{token}` from the confirmation email; no session needed |
+| `POST /api/auth/verify/resend` | session only; at most 3 an hour |
+| `GET /api/auth/invite/{token}` | → `{email, team, role}` for an invitation link |
+| `POST /api/auth/logout-all` | session only; ends every session of the account, this one included |
+
+`register` also takes `invite_token`: signing up through an invitation link
+verifies the address and works even when sign-up is closed. Until an address is
+verified (on instances that require it), artifacts shared with it and team
+invitations to it stay hidden; `email_trusted` says whether that is the case.
 
 ### Command-line login
 
@@ -183,7 +192,7 @@ visible in the side panel.
 | | |
 | --- | --- |
 | `GET/POST /api/orgs` | |
-| `GET/POST /api/orgs/{id}/members` | only an owner can grant the owner role or change an owner's role |
+| `GET/POST /api/orgs/{id}/members` | only an owner can grant the owner role or change an owner's role; inviting someone without an account returns `emailed`, and `invite_url` when the instance cannot send email |
 | `DELETE /api/orgs/{id}/members/{uid}` | only an owner can remove an owner; the last owner cannot be removed or demoted (`409`) |
 | `GET /api/orgs/{id}/artifacts` | |
 
@@ -194,6 +203,7 @@ visible in the side panel.
 | `GET/POST /api/keys`, `DELETE /api/keys/{id}` | session only |
 | `GET /api/admin/stats`, `/users`, `/events` | admins only |
 | `POST /api/admin/users/{id}/role` | `{is_admin}` |
+| `POST /api/admin/users/{id}/verify` | vouch for the user's email address |
 | `POST /api/admin/gc?dry_run=false&older_than_hours=24` | frees blobs no version references and nobody asked about in that window |
 
 ## Built-in chat

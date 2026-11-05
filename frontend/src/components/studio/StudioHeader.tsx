@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { Space, Visibility } from '../../lib/api'
 import { visibilityHint, visibilityLabel } from '../../lib/format'
 
-export type Pane = 'split' | 'code' | 'preview'
+export type View = 'chat' | 'preview'
 
 type Props = {
   editing: boolean
@@ -12,8 +12,7 @@ type Props = {
   visibility: Visibility; onVisibility(v: Visibility): void
   message: string; onMessage(v: string): void
   spaces: Space[]
-  pane: Pane; onPane(p: Pane): void
-  chatOpen: boolean; onToggleChat(): void
+  view: View; onView(v: View): void
   dirty: boolean
   busy: boolean
   onPublish(): void
@@ -23,8 +22,8 @@ type Props = {
 /**
  * The Studio's toolbar.
  *
- * It only holds what gets touched all the time: the title, which pane to look
- * at, and the publish button. Space, access and description are chosen once
+ * It only holds what gets touched all the time: the title, on a narrow screen
+ * the switch between conversation and preview, and the publish button. Space, access and description are chosen once
  * and live behind the button, because keeping them always open filled the top
  * of the page with empty fields and made the Studio look like a form.
  */
@@ -33,18 +32,6 @@ export function StudioHeader(p: Props) {
 
   return (
     <header className="flex shrink-0 items-center gap-3 border-b border-ink-800 px-3 py-2.5">
-      <button
-        onClick={p.onToggleChat}
-        aria-pressed={p.chatOpen}
-        title={p.chatOpen ? 'Hide the conversation' : 'Show the conversation'}
-        className={`grid h-8 w-8 shrink-0 place-items-center rounded-lg transition-colors ${
-          p.chatOpen ? 'bg-accent-500 text-ink-950' : 'bg-ink-800 text-ink-300 hover:text-white'}`}
-      >
-        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-          <path d="M21 11.5a8.4 8.4 0 0 1-9 8.4 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z" />
-        </svg>
-      </button>
-
       <TitleField value={p.title} onChange={p.onTitle} />
 
       {p.dirty && (
@@ -55,7 +42,7 @@ export function StudioHeader(p: Props) {
       )}
 
       <div className="ml-auto flex shrink-0 items-center gap-2">
-        <PaneSwitch pane={p.pane} onChange={p.onPane} />
+        <ViewSwitch view={p.view} onChange={p.onView} />
         {!p.editing && (
           <button
             onClick={p.onUpload}
@@ -110,28 +97,28 @@ function TitleField({ value, onChange }: { value: string; onChange(v: string): v
   )
 }
 
-function PaneSwitch({ pane, onChange }: { pane: Pane; onChange(p: Pane): void }) {
-  const opts: [Pane, string, string][] = [
-    ['code', 'Code', 'M8 6 2 12l6 6M16 6l6 6-6 6'],
-    ['split', 'Both', 'M12 3v18M3 3h18v18H3z'],
+/** Only on narrow screens: on wide ones both panes are always visible. */
+function ViewSwitch({ view, onChange }: { view: View; onChange(v: View): void }) {
+  const opts: [View, string, string][] = [
+    ['chat', 'Chat', 'M21 11.5a8.4 8.4 0 0 1-9 8.4 8.4 8.4 0 0 1-3.8-.9L3 21l1.9-5.7A8.4 8.4 0 0 1 12 3a8.4 8.4 0 0 1 9 8.5z'],
     ['preview', 'Preview', 'M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7-10-7-10-7z'],
   ]
   return (
-    <div className="flex gap-0.5 rounded-lg bg-ink-900 p-0.5" role="group" aria-label="Visible panes">
+    <div className="flex gap-0.5 rounded-lg bg-ink-900 p-0.5 lg:hidden" role="group" aria-label="Visible pane">
       {opts.map(([id, label, path]) => (
         <button
           key={id}
           onClick={() => onChange(id)}
-          aria-pressed={pane === id}
+          aria-pressed={view === id}
           title={label}
           className={`flex items-center gap-1.5 rounded-md px-2.5 py-1.5 text-xs transition-colors ${
-            pane === id ? 'bg-ink-700 text-white' : 'text-ink-500 hover:text-ink-100'}`}
+            view === id ? 'bg-ink-700 text-white' : 'text-ink-500 hover:text-ink-100'}`}
         >
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
             <path d={path} />
             {id === 'preview' && <circle cx="12" cy="12" r="3" />}
           </svg>
-          <span className="hidden lg:inline">{label}</span>
+          <span className="hidden sm:inline">{label}</span>
         </button>
       ))}
     </div>

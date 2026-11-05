@@ -32,7 +32,10 @@ func newFailureLimiter(max int, window time.Duration) *failureLimiter {
 	return &failureLimiter{max: max, window: window, entries: map[string]*failures{}}
 }
 
-var loginLimiter = newFailureLimiter(10, 15*time.Minute)
+var (
+	loginLimiter   = newFailureLimiter(10, 15*time.Minute)
+	ipLoginLimiter = newFailureLimiter(100, 15*time.Minute)
+)
 
 func (l *failureLimiter) allow(key string) bool {
 	l.mu.Lock()

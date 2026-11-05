@@ -1,7 +1,9 @@
 import { useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
 import { useSession } from '../../lib/session'
+import { api } from '../../lib/api'
 import { Logo } from '../ui/Logo'
+import { VerifyBanner } from './VerifyBanner'
 
 /**
  * The application frame: sidebar on the left, content on the right.
@@ -70,6 +72,16 @@ export function Shell() {
           >
             ⏻ Sign out
           </button>
+          <button
+            className="side-btn text-xs text-ink-500"
+            title="End every session of this account, on every device, including this one"
+            onClick={async () => {
+              if (!confirm('Sign out on every device, including this one?')) return
+              try { await api.logoutEverywhere() } finally { signOut(); nav('/auth') }
+            }}
+          >
+            Sign out everywhere
+          </button>
         </div>
       </aside>
 
@@ -77,11 +89,14 @@ export function Shell() {
         <div className="fixed inset-0 z-30 bg-black/50 md:hidden" onClick={() => setOpen(false)} aria-hidden />
       )}
 
-      <main className="min-w-0 flex-1 overflow-y-auto">
-        <div className="sticky top-0 z-20 flex items-center gap-3 border-b border-ink-800 bg-ink-950/90 px-4 py-2 backdrop-blur md:hidden">
+      {/* A column, so a full-height page (the Studio) can take exactly the
+          room left under the mobile bar instead of overflowing by its height. */}
+      <main className="flex min-w-0 flex-1 flex-col overflow-y-auto">
+        <div className="sticky top-0 z-20 flex shrink-0 items-center gap-3 border-b border-ink-800 bg-ink-950/90 px-4 py-2 backdrop-blur md:hidden">
           <button className="btn-ghost !px-2" onClick={() => setOpen(true)} aria-label="Open menu">☰</button>
           <Logo size={24} />
         </div>
+        <VerifyBanner />
         <Outlet />
       </main>
     </div>

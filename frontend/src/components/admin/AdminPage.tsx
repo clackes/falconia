@@ -79,6 +79,13 @@ export function AdminPage() {
                 <div className="truncate text-xs text-ink-500">{u.email} · joined {ago(u.created_at)}</div>
               </div>
               {u.is_admin && <span className="chip">admin</span>}
+              {!u.email_verified && (
+                <button className="text-xs text-amber-400 hover:text-amber-300"
+                  title="Vouch for this address: what is shared with it becomes visible to this account"
+                  onClick={async () => { await api.adminVerifyUser(u.id); reload() }}>
+                  Verify email
+                </button>
+              )}
               {u.id !== user?.id && (
                 <button className="text-xs text-ink-500 hover:text-ink-100"
                   onClick={async () => { await api.adminSetRole(u.id, !u.is_admin); reload() }}>

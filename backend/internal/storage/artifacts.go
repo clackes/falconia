@@ -869,3 +869,28 @@ func firstNonEmpty(vals ...string) string {
 func NewVersionInput(code, message, entryPath string, files []FileSpec) versionInput {
 	return versionInput{Code: code, Message: message, EntryPath: entryPath, Files: files}
 }
+
+// LinkTag is a short fingerprint of a link token, carried by the content
+// grants minted for anonymous link visitors. It lets the content server tell
+// that the link a grant came from is still the current one without the grant
+// carrying the secret itself.
+func LinkTag(token string) string {
+	sum := sha256.Sum256([]byte("link-tag:" + token))
+	return hex.EncodeToString(sum[:8])
+}
+
+// LinkGrantValid reports whether an anonymous grant with the given tag is
+// still good: the artifact is still shared by link, through the same link.
+func (p *Postgres) LinkGrantValid(ctx context.Context, artifactID uuid.UUID, tag string) (bool, error) {
+	var visibility string
+	var token *string
+	err := p.pool.QueryRow(ctx, `SELECT visibility, link_token FROM artifacts WHERE id=$1`, artifactID).
+		Scan(&visibility, &token)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return visibility == "link" && token != nil && tag != "" && LinkTag(*token) == tag, nil
+}

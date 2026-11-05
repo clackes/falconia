@@ -23,6 +23,7 @@ import (
 	"github.com/yuin/goldmark/extension"
 
 	"github.com/clackes/falconia/backend/internal/blob"
+	"github.com/clackes/falconia/backend/internal/clientip"
 	"github.com/clackes/falconia/backend/internal/storage"
 )
 
@@ -31,8 +32,11 @@ type Server struct {
 	Blobs      blob.Store
 	Secret     []byte
 	AppOrigin  string // the only origin allowed to frame artifacts
+	ClientIP   *clientip.Resolver
 	Logger     *slog.Logger
 	MaxInlineB int64
+
+	access accessCache
 }
 
 // Handler builds the content server's router.
@@ -99,6 +103,20 @@ func (s *Server) serveArtifact(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+	// The grant proves access was granted, not that it still is. Access is
+	// re-checked here, cached briefly per grant, so that revoking a share,
+	// making an artifact private or rotating its link takes effect within
+	// seconds instead of when the grant expires hours later.
+	allowed, err := s.stillAllowed(ctx, grantTok, g)
+	if err != nil {
+		s.Logger.Error("content access check", "err", err)
+		http.Error(w, "error", http.StatusInternalServerError)
+		return
+	}
+	if !allowed {
+		http.Error(w, "access to this artifact was revoked", http.StatusForbidden)
+		return
+	}
 	version, err := s.Store.GetVersion(ctx, g.ArtifactID, g.Version)
 	if err != nil {
 		http.Error(w, "not found", http.StatusNotFound)
@@ -322,14 +340,14 @@ func (s *Server) visitorHash(userID uuid.UUID, r *http.Request) string {
 	if userID != uuid.Nil {
 		return "u:" + userID.String()
 	}
-	ip := r.Header.Get("X-Forwarded-For")
-	if i := strings.IndexByte(ip, ','); i >= 0 {
-		ip = ip[:i]
-	}
-	if ip == "" {
-		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-			ip = host
-		}
+	// The address comes from the resolver, which only believes forwarding
+	// headers set by our own proxies: a client choosing its own address would
+	// inflate the unique-visitor count at will.
+	var ip string
+	if s.ClientIP != nil {
+		ip = s.ClientIP.Of(r)
+	} else if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		ip = host
 	}
 	h := hmac.New(sha256.New, s.Secret)
 	fmt.Fprintf(h, "visitor:%s", strings.TrimSpace(ip))
