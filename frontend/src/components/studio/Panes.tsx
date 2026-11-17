@@ -16,12 +16,13 @@ export function PaneHeader({ label, children }: { label: string; children?: Reac
   )
 }
 
-export function PaneButton({ title, onClick, children }: {
-  title: string; onClick(): void; children: ReactNode
+export function PaneButton({ title, onClick, children, disabled = false }: {
+  title: string; onClick(): void; children: ReactNode; disabled?: boolean
 }) {
   return (
-    <button onClick={onClick} title={title} aria-label={title}
-      className="grid h-6 w-6 place-items-center rounded text-ink-500 transition-colors hover:bg-ink-800 hover:text-ink-100">
+    <button onClick={onClick} title={title} aria-label={title} disabled={disabled}
+      className="grid h-6 w-6 place-items-center rounded text-ink-500 transition-colors hover:bg-ink-800 hover:text-ink-100
+                 disabled:cursor-default disabled:opacity-30 disabled:hover:bg-transparent disabled:hover:text-ink-500">
       {children}
     </button>
   )
@@ -35,10 +36,12 @@ export function PaneButton({ title, onClick, children }: {
  * with the future address does two things: it says this is a page, and it
  * shows right away the address that will be shared.
  */
-export function PreviewFrame({ address, frameRef, onReload }: {
+export function PreviewFrame({ address, frameRef, onReload, busy = false }: {
   address: string
   frameRef: RefObject<HTMLIFrameElement>
   onReload(): void
+  /** The agent is working: say so on the page it is about to replace. */
+  busy?: boolean
 }) {
   return (
     <div className="flex min-h-0 flex-1 flex-col bg-ink-950 p-3">
@@ -59,6 +62,12 @@ export function PreviewFrame({ address, frameRef, onReload }: {
             </svg>
           </button>
         </div>
+        {busy && (
+          <div role="status" className="flex h-1 shrink-0 overflow-hidden bg-accent-500/20">
+            <span className="sr-only">The assistant is updating the page</span>
+            <span className="h-full w-1/3 animate-pulse bg-accent-500" />
+          </div>
+        )}
         <iframe
           ref={frameRef}
           title="Preview"

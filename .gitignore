@@ -21,6 +21,3 @@ __pycache__/
 
 *.log
 .DS_Store
-
-# Copied from node_modules by npm run monaco
-frontend/public/monaco/
