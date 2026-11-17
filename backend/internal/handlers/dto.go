@@ -27,6 +27,10 @@ func writeErr(w http.ResponseWriter, status int, msg string) {
 // access "it exists but you can't" reveals that the artifact exists, which is
 // already information. Whoever is entitled to know it exists can see it.
 func writeStoreErr(w http.ResponseWriter, err error) {
+	if msg, ok := storage.IsInvalid(err); ok {
+		writeErr(w, http.StatusBadRequest, msg)
+		return
+	}
 	switch {
 	case errors.Is(err, storage.ErrNotFound), errors.Is(err, storage.ErrForbidden):
 		writeErr(w, http.StatusNotFound, "not found")
@@ -49,12 +53,14 @@ type userJSON struct {
 	Email       string    `json:"email"`
 	DisplayName string    `json:"display_name"`
 	IsAdmin     bool      `json:"is_admin"`
-	CreatedAt   time.Time `json:"created_at"`
+	// EmailVerified says whether the person proved they own Email.
+	EmailVerified bool      `json:"email_verified"`
+	CreatedAt     time.Time `json:"created_at"`
 }
 
 func publicUser(u *storage.User) userJSON {
 	return userJSON{ID: u.ID, Email: u.Email, DisplayName: u.DisplayName,
-		IsAdmin: u.IsAdmin, CreatedAt: u.CreatedAt}
+		IsAdmin: u.IsAdmin, EmailVerified: u.EmailVerifiedAt != nil, CreatedAt: u.CreatedAt}
 }
 
 type spaceJSON struct {

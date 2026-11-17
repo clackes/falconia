@@ -34,6 +34,17 @@ func (a *api) download(w http.ResponseWriter, r *http.Request, art *storage.Arti
 		return
 	}
 
+	// Every blob is checked before the first byte goes out: once the zip has
+	// started, the status code is already 200 and an error can no longer be
+	// reported as one.
+	for _, file := range files {
+		if ok, err := a.deps.Blobs.Has(r.Context(), file.SHA256); err != nil || !ok {
+			a.deps.Logger.Error("export: blob unavailable", "sha", file.SHA256, "err", err)
+			writeErr(w, http.StatusInternalServerError, "a file of this version is unavailable")
+			return
+		}
+	}
+
 	name := "artifact"
 	if art.Slug != nil && *art.Slug != "" {
 		name = *art.Slug
@@ -45,7 +56,6 @@ func (a *api) download(w http.ResponseWriter, r *http.Request, art *storage.Arti
 	w.Header().Set("X-Falconia-Version", strconv.Itoa(v.VersionNumber))
 
 	zw := zip.NewWriter(w)
-	defer zw.Close()
 	mod := v.CreatedAt
 	if mod.IsZero() {
 		mod = time.Now()
@@ -56,27 +66,49 @@ func (a *api) download(w http.ResponseWriter, r *http.Request, art *storage.Arti
 	if len(files) == 0 {
 		f, err := zw.CreateHeader(&zip.FileHeader{Name: v.EntryPath, Method: zip.Deflate, Modified: mod})
 		if err == nil {
-			_, _ = io.WriteString(f, v.CodePayload)
+			_, err = io.WriteString(f, v.CodePayload)
 		}
+		if err == nil {
+			err = zw.Close()
+		}
+		if err != nil {
+			panic(http.ErrAbortHandler)
+		}
+		a.record(r, art.ID, storage.EventExport, v.VersionNumber, nil)
 		return
 	}
 	for _, file := range files {
-		rc, err := a.deps.Blobs.Get(r.Context(), file.SHA256)
-		if err != nil {
-			a.deps.Logger.Error("export blob", "sha", file.SHA256, "err", err)
-			continue
+		if err := addToZip(r, a, zw, file, mod); err != nil {
+			// Skipping the file would hand `falconia pull` a well-formed zip
+			// with pieces missing, which then gets deployed back as if it
+			// were whole. Aborting the connection makes the client see a
+			// broken download instead.
+			a.deps.Logger.Error("export", "sha", file.SHA256, "path", file.Path, "err", err)
+			panic(http.ErrAbortHandler)
 		}
-		method := zip.Deflate
-		if alreadyCompressed(file.Path) {
-			method = zip.Store
-		}
-		f, err := zw.CreateHeader(&zip.FileHeader{Name: file.Path, Method: method, Modified: mod})
-		if err == nil {
-			_, _ = io.Copy(f, rc)
-		}
-		rc.Close()
+	}
+	if err := zw.Close(); err != nil {
+		panic(http.ErrAbortHandler)
 	}
 	a.record(r, art.ID, storage.EventExport, v.VersionNumber, nil)
+}
+
+func addToZip(r *http.Request, a *api, zw *zip.Writer, file storage.ArtifactFile, mod time.Time) error {
+	rc, err := a.deps.Blobs.Get(r.Context(), file.SHA256)
+	if err != nil {
+		return err
+	}
+	defer rc.Close()
+	method := zip.Deflate
+	if alreadyCompressed(file.Path) {
+		method = zip.Store
+	}
+	f, err := zw.CreateHeader(&zip.FileHeader{Name: file.Path, Method: method, Modified: mod})
+	if err != nil {
+		return err
+	}
+	_, err = io.Copy(f, rc)
+	return err
 }
 
 func alreadyCompressed(p string) bool {

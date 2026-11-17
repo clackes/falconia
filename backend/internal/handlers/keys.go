@@ -38,6 +38,9 @@ func (a *api) createKey(w http.ResponseWriter, r *http.Request) {
 	_ = decode(r, &in)
 
 	var ttl time.Duration
+	if in.ExpiresIn > 3650 {
+		in.ExpiresIn = 3650 // past ten years the multiplication below overflows
+	}
 	if in.ExpiresIn > 0 {
 		ttl = time.Duration(in.ExpiresIn) * 24 * time.Hour
 	}

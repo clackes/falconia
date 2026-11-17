@@ -26,6 +26,56 @@ open-source, self-hosted home for artifacts made by any AI agent.
   policy, CI, release workflow publishing images to GHCR, unit and end-to-end
   tests.
 
+### Changed (Studio)
+- Creating and editing an artifact is now a conversation and a live preview:
+  the code editor is gone. Every answer from the agent can be undone and
+  redone from the preview; on a phone a switch moves between chat and
+  preview. Hand-editing the source stays possible with `falconia pull` and any
+  editor. The Monaco dependency is removed from the frontend.
+
+### Security
+- Email addresses must be proven before they unlock shares or team
+  invitations (confirmation link by email, invitation link, or an
+  administrator). New `SMTP_*`, `EMAIL_VERIFICATION` settings.
+- Team invitations travel as single-use links (14 days) and let invited people
+  sign up on instances with sign-up closed.
+- "Sign out everywhere" revokes every session of an account.
+- The CLI login key is minted when the CLI collects it, never stored in clear.
+- Content grants are re-checked (30-second cache): revoking a share, making
+  an artifact private or rotating its link takes effect within seconds instead
+  of when the two-hour grant expires.
+- Client addresses come from `X-Forwarded-For` only through trusted proxies
+  (`TRUSTED_PROXIES`); login is also limited per address.
+- CLI login codes are drawn without modulo bias.
+
+### Fixed
+- Two sign-ups on an empty instance could both become administrator; with
+  sign-up closed, several "first" accounts could slip in.
+- Team admins could make themselves owners, demote owners or remove them; two
+  owners removing each other at once could leave a team with none.
+- `/api/chat` accepted API keys, letting a read-only key drive tools with the
+  account's full rights; custom `base_url` could reach cloud metadata
+  addresses.
+- Blob garbage collection deleted bytes before rows and could break a version
+  being deployed at that moment; a blob whose row was lost could never be
+  re-registered.
+- File sizes came from the deploy manifest and were served as Content-Length;
+  they are now the measured ones (existing rows are repaired by migration 010).
+- An artifact that had been forked could not be deleted.
+- Concurrent creates asking for the same slug failed with a 500 instead of
+  getting the next free one.
+- Approving a CLI login twice at once minted an orphan year-long key; expired
+  login codes were only purged at startup.
+- Queued agent requests hung forever when the agent disconnected; a negative
+  `from` on the stream crashed the handler.
+- A zip export silently skipped unreadable files.
+- Comment edits and deletes no longer work after losing access to the artifact;
+  empty or invalid input returns `400` instead of `500`, and storage errors no
+  longer leak into responses.
+- Login now costs the same for unknown and known emails and is rate limited per
+  account; health checks include the database; one structured access-log line
+  per request.
+
 ### Changed
 - Everything is in English: interface, CLI, docs, agent instructions, code
   comments.

@@ -12,6 +12,8 @@ type SessionValue = {
   loading: boolean
   /** The personal space, the default destination of every publish. */
   personalSpace: Space | null
+  /** Whether what is shared with the user's address is visible yet. */
+  emailTrusted: boolean
   signIn(token: string, user: User): void
   signOut(): void
   refresh(): Promise<void>
@@ -24,6 +26,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const [spaces, setSpaces] = useState<Space[]>([])
   const [config, setConfig] = useState<InstanceConfig | null>(null)
   const [loading, setLoading] = useState(true)
+  const [emailTrusted, setEmailTrusted] = useState(true)
 
   const refresh = useCallback(async () => {
     // Without a token there is nothing to ask: the request would return 401
@@ -37,6 +40,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       const me = await api.me()
       setUser(me.user)
       setSpaces(me.spaces)
+      setEmailTrusted(me.email_trusted !== false)
     } catch (e) {
       setUser(null)
       setSpaces([])
@@ -66,6 +70,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
   const value = useMemo<SessionValue>(() => ({
     user, spaces, config, loading,
     personalSpace: spaces.find((s) => s.kind === 'personal') ?? null,
+    emailTrusted,
     signIn(token, u) {
       setToken(token)
       setUser(u)
@@ -77,7 +82,7 @@ export function SessionProvider({ children }: { children: ReactNode }) {
       setSpaces([])
     },
     refresh,
-  }), [user, spaces, config, loading, refresh])
+  }), [user, spaces, config, loading, refresh, emailTrusted])
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>
 }

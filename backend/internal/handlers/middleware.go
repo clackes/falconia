@@ -2,12 +2,17 @@ package handlers
 
 import (
 	"context"
+	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 
 	"github.com/clackes/falconia/backend/internal/agents"
+	"github.com/clackes/falconia/backend/internal/clientip"
 	"github.com/clackes/falconia/backend/internal/storage"
 	"github.com/clackes/falconia/backend/pkg/auth"
 )
@@ -185,6 +190,8 @@ func (a *api) adminOnly(next http.HandlerFunc) http.HandlerFunc {
 	})
 }
 
+var errSessionRevoked = errors.New("session revoked")
+
 // identify resolves the bearer token, JWT or API key alike.
 func (a *api) identify(r *http.Request) (*identity, error) {
 	tok := extractBearer(r)
@@ -205,6 +212,13 @@ func (a *api) identify(r *http.Request) (*identity, error) {
 	u, err := a.deps.Store.GetUser(r.Context(), claims.UserID)
 	if err != nil {
 		return nil, err
+	}
+	// "Sign out everywhere" stamps a time; any session issued at or before
+	// it is dead. iat has one-second resolution, so the comparison is on whole
+	// seconds and errs on the side of rejecting.
+	if u.TokensValidAfter != nil && claims.IssuedAt != nil &&
+		!claims.IssuedAt.After(u.TokensValidAfter.Truncate(time.Second)) {
+		return nil, errSessionRevoked
 	}
 	return &identity{User: u}, nil
 }
@@ -242,9 +256,44 @@ func userIDOf(id *identity) uuid.UUID {
 	return id.User.ID
 }
 
-func emailOf(id *identity) string {
+// accessEmail is the address that may unlock email-based grants for the
+// caller: empty for anonymous callers and for unverified addresses.
+func (a *api) accessEmail(id *identity) string {
 	if id == nil || id.User == nil {
 		return ""
 	}
-	return id.User.Email
+	return a.deps.Store.AccessEmail(id.User)
+}
+
+// accessLog writes one structured line per request.
+//
+// Health checks are left out: the container probes every thirty seconds and
+// would bury everything else. Query strings are left out too, because
+// /api/p/{token} carries a secret in the path and some clients put tokens in
+// queries; the path of a link request is reduced to its prefix for the same
+// reason.
+func accessLog(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/health" {
+				next.ServeHTTP(w, r)
+				return
+			}
+			start := time.Now()
+			ww := middleware.NewWrapResponseWriter(w, r.ProtoMajor)
+			next.ServeHTTP(ww, r)
+			p := r.URL.Path
+			if strings.HasPrefix(p, "/api/p/") {
+				p = "/api/p/…"
+			}
+			level := slog.LevelInfo
+			if ww.Status() >= 500 {
+				level = slog.LevelError
+			}
+			logger.Log(r.Context(), level, "http",
+				"method", r.Method, "path", p, "status", ww.Status(),
+				"bytes", ww.BytesWritten(), "ms", time.Since(start).Milliseconds(),
+				"ip", clientip.From(r), "req_id", middleware.GetReqID(r.Context()))
+		})
+	}
 }

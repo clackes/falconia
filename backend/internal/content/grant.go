@@ -44,6 +44,10 @@ type Grant struct {
 	Version    int       `json:"v"`
 	UserID     uuid.UUID `json:"u"`
 	ExpiresAt  int64     `json:"e"`
+	// LinkTag is set on anonymous grants: the fingerprint of the link they
+	// were minted through (storage.LinkTag), so rotating the link or making
+	// the artifact private ends them too.
+	LinkTag string `json:"l,omitempty"`
 }
 
 var enc = base64.RawURLEncoding

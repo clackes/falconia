@@ -25,14 +25,6 @@ var migrationFS embed.FS
 // Without the lock both would try to create the same indexes and one would
 // die at startup.
 func (p *Postgres) Migrate(ctx context.Context, logger *slog.Logger) error {
-	if _, err := p.pool.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version    TEXT PRIMARY KEY,
-			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-		)`); err != nil {
-		return fmt.Errorf("create schema_migrations: %w", err)
-	}
-
 	conn, err := p.pool.Acquire(ctx)
 	if err != nil {
 		return err
@@ -47,6 +39,17 @@ func (p *Postgres) Migrate(ctx context.Context, logger *slog.Logger) error {
 		return fmt.Errorf("advisory lock: %w", err)
 	}
 	defer conn.Exec(context.WithoutCancel(ctx), `SELECT pg_advisory_unlock($1)`, lockID)
+
+	// Inside the lock, not before it: CREATE TABLE IF NOT EXISTS is not safe
+	// against itself, and two replicas creating the table at the same instant
+	// can fail with a duplicate-key error on the catalog.
+	if _, err := conn.Exec(ctx, `
+		CREATE TABLE IF NOT EXISTS schema_migrations (
+			version    TEXT PRIMARY KEY,
+			applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+		)`); err != nil {
+		return fmt.Errorf("create schema_migrations: %w", err)
+	}
 
 	applied := map[string]bool{}
 	rows, err := conn.Query(ctx, `SELECT version FROM schema_migrations`)

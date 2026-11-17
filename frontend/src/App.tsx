@@ -1,6 +1,7 @@
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom'
 import { Shell } from './components/layout/Shell'
 import { AuthPage } from './components/auth/AuthPage'
+import { VerifyPage } from './components/auth/VerifyPage'
 import { Dashboard } from './components/dashboard/Dashboard'
 import { SpacePage } from './components/dashboard/SpacePage'
 import { ArtifactPage } from './components/viewer/ArtifactPage'
@@ -33,6 +34,7 @@ export default function App() {
         {/* A shared link opens without an account: that is its whole point. */}
         <Route path="/p/:token" element={<LinkPage />} />
         <Route path="/auth" element={<AuthPage />} />
+        <Route path="/verify" element={<VerifyPage />} />
         <Route path="*" element={<Navigate to="/auth" replace state={{ from: loc.pathname + loc.search }} />} />
       </Routes>
     )
@@ -45,6 +47,7 @@ export default function App() {
       <Route path="/s/:space/:slug" element={<ArtifactPage />} />
       <Route path="/a/:id" element={<ArtifactPage />} />
       <Route path="/p/:token" element={<LinkPage />} />
+      <Route path="/verify" element={<VerifyPage />} />
 
       <Route element={<Shell />}>
         <Route path="/" element={<Dashboard />} />

@@ -17,7 +17,7 @@ import (
 // The caller's message format is {role: "user"|"assistant", content: string}.
 // Internally tool_use/tool_result are added as structured blocks.
 func RunAnthropic(ctx context.Context, apiKey, model string, messages []Message, sys string, tools []ToolDef, exec Executor, emit func(Event)) error {
-	httpc := &http.Client{}
+	httpc := httpClient
 
 	// Internal conversation: messages whose content is an array of blocks
 	// (text|tool_use|tool_result), starting from the plain text turns.

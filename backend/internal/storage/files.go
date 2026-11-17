@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 )
 
 // FileSpec describes a file joining a version. The bytes are already in the
@@ -79,17 +80,71 @@ func insertFilesTx(ctx context.Context, tx pgx.Tx, versionID int64, files []File
 	return nil
 }
 
-// RegisterBlob records in the database a blob already written to the object
-// store.
+// blobLockClass namespaces the per-blob advisory locks (two-key form: class,
+// hash of the sha).
+const blobLockClass = 0x53464102
+
+// StoreBlob writes a blob's bytes through write and records its row, under a
+// per-blob lock shared with CollectBlob.
 //
 // Order matters: bytes first, then the row. A blob without a row is garbage
 // the collector picks up; a row without bytes is a broken artifact that serves
-// a 500 to whoever opens it.
-func (p *Postgres) RegisterBlob(ctx context.Context, sha string, size int64) error {
-	_, err := p.pool.Exec(ctx,
-		`INSERT INTO blobs (sha256, size_bytes) VALUES ($1,$2) ON CONFLICT (sha256) DO NOTHING`,
-		sha, size)
-	return err
+// a 500 to whoever opens it. The lock is what makes that order hold against
+// the collector: without it, the collector could delete the bytes right after
+// write decided they were already there.
+func (p *Postgres) StoreBlob(ctx context.Context, sha string, size int64, write func() error) error {
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`, blobLockClass, sha); err != nil {
+		return err
+	}
+	if err := write(); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx,
+		`INSERT INTO blobs (sha256, size_bytes) VALUES ($1,$2)
+		 ON CONFLICT (sha256) DO UPDATE SET last_used_at = NOW()`, sha, size); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// HasBlobRow reports whether the database knows a blob. It is the source of
+// truth for "do we have it": bytes without a row may be about to be collected.
+func (p *Postgres) HasBlobRow(ctx context.Context, sha string) (bool, error) {
+	var ok bool
+	err := p.pool.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM blobs WHERE sha256=$1)`, sha).Scan(&ok)
+	return ok, err
+}
+
+// BlobSizes returns the stored size of each known hash.
+//
+// A deploy manifest declares sizes, but the declaration comes from the client:
+// the size recorded when the bytes were hashed is the one that is true, and it
+// is the one the content server will put in Content-Length.
+func (p *Postgres) BlobSizes(ctx context.Context, shas []string) (map[string]int64, error) {
+	out := map[string]int64{}
+	if len(shas) == 0 {
+		return out, nil
+	}
+	rows, err := p.pool.Query(ctx,
+		`SELECT sha256, size_bytes FROM blobs WHERE sha256 = ANY($1::text[])`, shas)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var sha string
+		var n int64
+		if err := rows.Scan(&sha, &n); err != nil {
+			return nil, err
+		}
+		out[sha] = n
+	}
+	return out, rows.Err()
 }
 
 // MissingBlobs filters the hashes the instance does not have yet.
@@ -101,8 +156,15 @@ func (p *Postgres) MissingBlobs(ctx context.Context, shas []string) ([]string, e
 	if len(shas) == 0 {
 		return []string{}, nil
 	}
+	// Asking about a blob is a sign someone is about to use it: refresh it, so
+	// the collector does not delete it between this answer and the deploy.
+	if _, err := p.pool.Exec(ctx, `
+		UPDATE blobs SET last_used_at = NOW()
+		 WHERE sha256 = ANY($1::text[]) AND last_used_at < NOW() - INTERVAL '1 minute'`, shas); err != nil {
+		return nil, err
+	}
 	rows, err := p.pool.Query(ctx, `
-		SELECT s FROM UNNEST($1::text[]) AS s
+		SELECT DISTINCT s FROM UNNEST($1::text[]) AS s
 		 WHERE NOT EXISTS (SELECT 1 FROM blobs b WHERE b.sha256 = s)`, shas)
 	if err != nil {
 		return nil, err
@@ -172,7 +234,7 @@ func (p *Postgres) OrphanBlobs(ctx context.Context, olderThanHours int, limit in
 	}
 	rows, err := p.pool.Query(ctx, `
 		SELECT b.sha256 FROM blobs b
-		 WHERE b.created_at < NOW() - make_interval(hours => $1)
+		 WHERE b.last_used_at < NOW() - make_interval(hours => $1)
 		   AND NOT EXISTS (SELECT 1 FROM artifact_files f WHERE f.sha256 = b.sha256)
 		 LIMIT $2`, olderThanHours, limit)
 	if err != nil {
@@ -190,9 +252,45 @@ func (p *Postgres) OrphanBlobs(ctx context.Context, olderThanHours int, limit in
 	return out, rows.Err()
 }
 
-func (p *Postgres) ForgetBlob(ctx context.Context, sha string) error {
-	_, err := p.pool.Exec(ctx, `DELETE FROM blobs WHERE sha256=$1`, sha)
-	return err
+// CollectBlob deletes one orphan blob, row and bytes, if it is still
+// collectable, and reports whether it did.
+//
+// The row goes first, conditionally, and the bytes only once that succeeded,
+// all under the lock StoreBlob takes. A version that started using the blob in
+// the meantime makes the delete match nothing (or fail on the RESTRICT
+// foreign key) and the bytes stay. If deleting the bytes fails, the row is
+// kept too, so the next run tries again instead of forgetting about them.
+func (p *Postgres) CollectBlob(ctx context.Context, sha string, olderThanHours int, deleteBytes func() error) (bool, error) {
+	if olderThanHours <= 0 {
+		olderThanHours = 24
+	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1, hashtext($2))`, blobLockClass, sha); err != nil {
+		return false, err
+	}
+	tag, err := tx.Exec(ctx, `
+		DELETE FROM blobs b
+		 WHERE b.sha256 = $1
+		   AND b.last_used_at < NOW() - make_interval(hours => $2)
+		   AND NOT EXISTS (SELECT 1 FROM artifact_files f WHERE f.sha256 = b.sha256)`, sha, olderThanHours)
+	if err != nil {
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return false, nil // referenced after all: keep it
+		}
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	if err := deleteBytes(); err != nil {
+		return false, err
+	}
+	return true, tx.Commit(ctx)
 }
 
 // StorageStats feeds the admin panel.

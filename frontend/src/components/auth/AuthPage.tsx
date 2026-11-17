@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import { useLocation, useNavigate } from 'react-router-dom'
+import { useEffect, useState } from 'react'
+import { useLocation, useNavigate, useSearchParams } from 'react-router-dom'
 import { api, ApiError } from '../../lib/api'
 import { useSession } from '../../lib/session'
 import { LogoMark } from '../ui/Logo'
@@ -18,14 +18,26 @@ export function AuthPage() {
   const { config, signIn } = useSession()
   const nav = useNavigate()
   const loc = useLocation()
-  const [mode, setMode] = useState<'login' | 'register'>('login')
+  const [params] = useSearchParams()
+  const inviteToken = params.get('invite') ?? ''
+  const [invite, setInvite] = useState<{ email: string; team: string } | null>(null)
+  const [mode, setMode] = useState<'login' | 'register'>(inviteToken ? 'register' : 'login')
   const [email, setEmail] = useState('')
   const [password, setPassword] = useState('')
   const [name, setName] = useState('')
   const [err, setErr] = useState('')
   const [busy, setBusy] = useState(false)
 
-  const canRegister = config?.allow_registration !== false
+  // An invitation link opens sign-up even when it is closed, for the address
+  // it was sent to.
+  useEffect(() => {
+    if (!inviteToken) return
+    api.describeInvite(inviteToken)
+      .then((r) => { setInvite(r); setEmail(r.email); setMode('register') })
+      .catch(() => setErr('This invitation link is invalid or has expired: ask for a new one.'))
+  }, [inviteToken])
+
+  const canRegister = config?.allow_registration !== false || !!invite
   const destination = (loc.state as { from?: string } | null)?.from || '/'
 
   async function submit(e: React.FormEvent) {
@@ -35,7 +47,7 @@ export function AuthPage() {
     try {
       const r = mode === 'login'
         ? await api.login(email, password)
-        : await api.register(email, password, name)
+        : await api.register(email, password, name, invite ? inviteToken : undefined)
       signIn(r.token, r.user)
       nav(destination, { replace: true })
     } catch (e) {
@@ -81,6 +93,11 @@ export function AuthPage() {
             {mode === 'login' ? 'Sign in' : 'Create your account'}
           </h1>
 
+          {invite && (
+            <p className="mb-4 rounded-lg border border-accent-500/30 bg-accent-500/10 px-3 py-2 text-sm text-ink-100">
+              You are invited to <strong>{invite.team}</strong>. Create your account with {invite.email}.
+            </p>
+          )}
           <form onSubmit={submit} className="card space-y-4 p-6">
             {mode === 'register' && (
               <Field label="Name">
@@ -90,7 +107,8 @@ export function AuthPage() {
             )}
             <Field label="Email">
               <input className="input" type="email" required value={email}
-                onChange={(e) => setEmail(e.target.value)} autoComplete="email" />
+                onChange={(e) => setEmail(e.target.value)} autoComplete="email"
+                readOnly={!!invite && mode === 'register'} />
             </Field>
             <Field label="Password">
               <input className="input" type="password" required value={password}

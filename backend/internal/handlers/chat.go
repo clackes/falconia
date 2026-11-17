@@ -82,8 +82,10 @@ func (a *api) aiChat(w http.ResponseWriter, r *http.Request) {
 	case "local", "custom":
 		if in.BaseURL == "" {
 			err = errors.New("this provider needs a base_url")
+		} else if base, verr := ai.NormalizeBaseURL(in.BaseURL); verr != nil {
+			err = verr
 		} else {
-			err = ai.RunOpenAICompat(ctx, in.BaseURL, orDefault(in.APIKey, "none"), in.Model, in.Messages, sys, toolDefs, exec, emit, nil)
+			err = ai.RunOpenAICompat(ctx, base, orDefault(in.APIKey, "none"), in.Model, in.Messages, sys, toolDefs, exec, emit, nil)
 		}
 	default:
 		err = fmt.Errorf("unknown provider: %s", in.Provider)

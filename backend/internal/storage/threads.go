@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/clackes/falconia/backend/internal/agents"
 )
@@ -94,10 +95,14 @@ func scanThread(row pgx.Row) (*Thread, error) {
 
 // CreateThread opens a conversation and writes its first message.
 func (p *Postgres) CreateThread(ctx context.Context, artifactID, userID uuid.UUID, versionNumber int, pagePath, body string, anchor *Anchor, via string) (*Thread, error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, errors.New("empty comment")
+	body, err := cleanBody(body)
+	if err != nil {
+		return nil, err
 	}
+	// Normalize before defaulting: a path that normalizes to nothing ("..",
+	// "/") must land on the entry document, not be stored as an empty string
+	// no viewer will ever match.
+	pagePath = NormalizePath(pagePath)
 	if pagePath == "" {
 		pagePath = "index.html"
 	}
@@ -119,7 +124,7 @@ func (p *Postgres) CreateThread(ctx context.Context, artifactID, userID uuid.UUI
 	if err := tx.QueryRow(ctx, `
 		INSERT INTO comment_threads (artifact_id, version_number, page_path, anchor, created_by)
 		VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-		artifactID, versionNumber, NormalizePath(pagePath), raw, userID).Scan(&id); err != nil {
+		artifactID, versionNumber, pagePath, raw, userID).Scan(&id); err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `
@@ -139,48 +144,85 @@ func (p *Postgres) CreateThread(ctx context.Context, artifactID, userID uuid.UUI
 // Replying implicitly reopens a resolved thread: if someone writes again about
 // something that was closed, evidently it was not done.
 func (p *Postgres) Reply(ctx context.Context, threadID, userID uuid.UUID, body, via string) (*Comment, error) {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return nil, errors.New("empty comment")
+	body, err := cleanBody(body)
+	if err != nil {
+		return nil, err
 	}
+	tx, err := p.pool.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback(ctx)
+
+	// Reopening and inserting happen together: a reply that lands while the
+	// thread stays resolved would be a message nobody is shown as pending.
 	var artifactID uuid.UUID
-	if err := p.pool.QueryRow(ctx,
-		`SELECT artifact_id FROM comment_threads WHERE id=$1`, threadID).Scan(&artifactID); err != nil {
+	if err := tx.QueryRow(ctx, `
+		UPDATE comment_threads
+		   SET updated_at=NOW(), status='open', resolved_by=NULL, resolved_at=NULL
+		 WHERE id=$1 RETURNING artifact_id`, threadID).Scan(&artifactID); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrNotFound
 		}
 		return nil, err
 	}
 	c := &Comment{ThreadID: threadID, UserID: userID, Body: body, Via: sanitizeVia(via), Agent: agents.From(ctx)}
-	if err := p.pool.QueryRow(ctx, `
+	if err := tx.QueryRow(ctx, `
 		INSERT INTO artifact_comments (artifact_id, thread_id, user_id, body, via, agent)
 		VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, created_at, updated_at`,
 		artifactID, threadID, userID, body, c.Via, c.Agent,
 	).Scan(&c.ID, &c.CreatedAt, &c.UpdatedAt); err != nil {
 		return nil, err
 	}
-	if _, err := p.pool.Exec(ctx,
-		`UPDATE comment_threads
-		    SET updated_at=NOW(), status='open', resolved_by=NULL, resolved_at=NULL
-		  WHERE id=$1`, threadID); err != nil {
-		return nil, err
+	return c, tx.Commit(ctx)
+}
+
+// maxCommentBytes bounds one message. Generous for a review note, small enough
+// that an agent stuck in a loop cannot paste a whole build log into a thread.
+const maxCommentBytes = 20000
+
+func cleanBody(body string) (string, error) {
+	body = strings.TrimSpace(body)
+	if body == "" {
+		return "", invalid("the comment is empty")
 	}
-	return c, nil
+	if len(body) > maxCommentBytes {
+		return "", invalid("the comment is too long")
+	}
+	return body, nil
+}
+
+// CommentArtifact returns the artifact a comment belongs to, so the caller can
+// check access through the artifact like every other comment operation.
+func (p *Postgres) CommentArtifact(ctx context.Context, commentID uuid.UUID) (uuid.UUID, error) {
+	var id uuid.UUID
+	err := p.pool.QueryRow(ctx, `SELECT artifact_id FROM artifact_comments WHERE id=$1`, commentID).Scan(&id)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return uuid.Nil, ErrNotFound
+	}
+	return id, err
 }
 
 // SetThreadStatus resolves or reopens a thread.
 func (p *Postgres) SetThreadStatus(ctx context.Context, threadID, userID uuid.UUID, resolved bool) error {
 	var err error
+	var tag pgconn.CommandTag
 	if resolved {
-		_, err = p.pool.Exec(ctx,
+		tag, err = p.pool.Exec(ctx,
 			`UPDATE comment_threads SET status='resolved', resolved_by=$2, resolved_at=NOW(), updated_at=NOW()
 			  WHERE id=$1`, threadID, userID)
 	} else {
-		_, err = p.pool.Exec(ctx,
+		tag, err = p.pool.Exec(ctx,
 			`UPDATE comment_threads SET status='open', resolved_by=NULL, resolved_at=NULL, updated_at=NOW()
 			  WHERE id=$1`, threadID)
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return ErrNotFound
+	}
+	return nil
 }
 
 func (p *Postgres) GetThread(ctx context.Context, id uuid.UUID) (*Thread, error) {
@@ -286,9 +328,9 @@ func (p *Postgres) listComments(ctx context.Context, threadIDs []uuid.UUID) ([]C
 // EditComment and DeleteComment only work on one's own message: moderating
 // others is the artifact owner's job, and it goes through deleting the thread.
 func (p *Postgres) EditComment(ctx context.Context, commentID, userID uuid.UUID, body string) error {
-	body = strings.TrimSpace(body)
-	if body == "" {
-		return errors.New("empty comment")
+	body, err := cleanBody(body)
+	if err != nil {
+		return err
 	}
 	tag, err := p.pool.Exec(ctx,
 		`UPDATE artifact_comments SET body=$3, edited=TRUE, updated_at=NOW()

@@ -3,6 +3,7 @@ package handlers
 import (
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -38,10 +39,14 @@ func (a *api) addShare(w http.ResponseWriter, r *http.Request, art *storage.Arti
 	// People added by email get access whatever the general access is, like
 	// on a Google Doc: there is no visibility to flip.
 	if err := a.deps.Store.AddShare(r.Context(), art.ID, identityFrom(r).User.ID, in.Email, in.Role); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeStoreErr(w, err)
 		return
 	}
 	a.record(r, art.ID, storage.EventShare, 0, map[string]any{"email": strings.ToLower(in.Email)})
+	me := identityFrom(r).User
+	a.sendMail(strings.ToLower(strings.TrimSpace(in.Email)), me.DisplayName+" shared \""+oneLine(art.Title)+"\" with you",
+		me.DisplayName+" shared \""+oneLine(art.Title)+"\" with you on Falconia:\n\n"+a.deps.AppBaseURL+art.Path()+"\n\n"+
+			"Sign in (or sign up) with this address to open it.\n")
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -142,7 +147,7 @@ func (a *api) listOrgMembers(w http.ResponseWriter, r *http.Request, o *storage.
 	})
 }
 
-func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
+func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org, myRole string) {
 	var in struct {
 		Email string `json:"email"`
 		Role  string `json:"role"`
@@ -151,22 +156,52 @@ func (a *api) inviteToOrg(w http.ResponseWriter, r *http.Request, o *storage.Org
 		writeErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	outcome, err := a.deps.Store.InviteToOrg(r.Context(), o.ID, identityFrom(r).User.ID, in.Email, in.Role)
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+	outcome, token, err := a.deps.Store.InviteToOrg(r.Context(), o.ID, identityFrom(r).User.ID, myRole, in.Email, in.Role)
+	if errors.Is(err, storage.ErrForbidden) {
+		writeErr(w, http.StatusForbidden, "only an owner can grant or change the owner role")
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"result": outcome})
+	if errors.Is(err, storage.ErrLastOwner) {
+		writeErr(w, http.StatusConflict, "this is the last owner: make someone else owner first")
+		return
+	}
+	if err != nil {
+		writeStoreErr(w, err)
+		return
+	}
+	out := map[string]any{"result": outcome}
+	if token != "" {
+		link := a.deps.AppBaseURL + "/auth?invite=" + url.QueryEscape(token)
+		if a.deps.Mailer != nil {
+			// With a mail server the link goes only to the invitee: shown to
+			// the inviter, it would let them sign up as that person.
+			me := identityFrom(r).User
+			a.sendMail(strings.ToLower(strings.TrimSpace(in.Email)), "You are invited to "+o.Name+" on Falconia",
+				me.DisplayName+" invited you to the team "+o.Name+" on Falconia.\n\n"+
+					"Create your account with this link (it expires in 14 days):\n\n"+link+"\n")
+			out["emailed"] = true
+		} else {
+			// Without one, the inviter is the only way the link can travel:
+			// they pass it on through whatever channel the team uses.
+			out["invite_url"] = link
+			out["emailed"] = false
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
-func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
+func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage.Org, myRole string) {
 	uid, err := uuid.Parse(chi.URLParam(r, "uid"))
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	err = a.deps.Store.RemoveOrgMember(r.Context(), o.ID, uid)
+	err = a.deps.Store.RemoveOrgMember(r.Context(), o.ID, myRole, uid)
 	if errors.Is(err, storage.ErrForbidden) {
+		writeErr(w, http.StatusForbidden, "only an owner can remove another owner")
+		return
+	}
+	if errors.Is(err, storage.ErrLastOwner) {
 		writeErr(w, http.StatusConflict,
 			"this is the last owner: make someone else owner before removing them")
 		return
@@ -179,16 +214,35 @@ func (a *api) removeOrgMember(w http.ResponseWriter, r *http.Request, o *storage
 }
 
 func (a *api) listOrgArtifacts(w http.ResponseWriter, r *http.Request, o *storage.Org, _ string) {
-	sp, err := a.deps.Store.GetSpaceByOrg(r.Context(), o.ID)
+	// Ensure, not get: the space is created after the team's own transaction,
+	// and a team whose space creation failed must heal on first use.
+	sp, err := a.deps.Store.EnsureOrgSpace(r.Context(), o.ID, o.Slug, o.Name)
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	id := identityFrom(r)
-	items, err := a.deps.Store.ListBySpace(r.Context(), sp.ID, id.User.ID, id.User.Email)
+	items, err := a.deps.Store.ListBySpace(r.Context(), sp.ID, id.User.ID, a.deps.Store.AccessEmail(id.User))
 	if err != nil {
 		writeStoreErr(w, err)
 		return
 	}
 	a.writeArtifactList(w, r, items)
+}
+
+// oneLine keeps a title from breaking an email header.
+func oneLine(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	if len(s) > 120 {
+		s = truncateRunes(s, 120) + "…"
+	}
+	return s
+}
+
+func truncateRunes(s string, n int) string {
+	r := []rune(s)
+	if len(r) <= n {
+		return s
+	}
+	return string(r[:n])
 }

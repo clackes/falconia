@@ -151,9 +151,8 @@ func (a *api) deleteThread(w http.ResponseWriter, r *http.Request, t *storage.Th
 }
 
 func (a *api) editComment(w http.ResponseWriter, r *http.Request) {
-	cid, err := uuid.Parse(chi.URLParam(r, "cid"))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid id")
+	cid, ok := a.commentParam(w, r)
+	if !ok {
 		return
 	}
 	var in struct {
@@ -171,9 +170,8 @@ func (a *api) editComment(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *api) deleteComment(w http.ResponseWriter, r *http.Request) {
-	cid, err := uuid.Parse(chi.URLParam(r, "cid"))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "invalid id")
+	cid, ok := a.commentParam(w, r)
+	if !ok {
 		return
 	}
 	if err := a.deps.Store.DeleteComment(r.Context(), cid, identityFrom(r).User.ID); err != nil {
@@ -223,4 +221,25 @@ func (a *api) reviewDigest(w http.ResponseWriter, r *http.Request, art *storage.
 	}
 	w.Header().Set("Content-Type", "text/markdown; charset=utf-8")
 	_, _ = w.Write([]byte(b.String()))
+}
+
+// commentParam resolves {cid} and checks that the caller can still open the
+// artifact the comment is on. Owning the comment is not enough: someone whose
+// access was revoked must not keep rewriting what they left behind.
+func (a *api) commentParam(w http.ResponseWriter, r *http.Request) (uuid.UUID, bool) {
+	cid, err := uuid.Parse(chi.URLParam(r, "cid"))
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "invalid id")
+		return uuid.Nil, false
+	}
+	artID, err := a.deps.Store.CommentArtifact(r.Context(), cid)
+	if err != nil {
+		writeStoreErr(w, err)
+		return uuid.Nil, false
+	}
+	if _, _, err := a.access(r, artID); err != nil {
+		writeStoreErr(w, err)
+		return uuid.Nil, false
+	}
+	return cid, true
 }
